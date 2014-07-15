@@ -3,6 +3,7 @@ amqp = require('amqp')
 Q = require('q')
 uuid = require('node-uuid')
 assert = require('assert')
+{Readable} = require('stream')
 
 # use a shared connection per service
 connection = null
@@ -43,19 +44,9 @@ class Vent
         @
 
     subscribe: (details, cb) ->
-        ###
-
-            TODO: add support for ack|shift|reject|requeue
-        ###
         return cb(new Error("a topic is required for subscribe")) unless details.topic
 
-        details.channel ?= @setup.default_channel
-        details.group ?= uuid.v4()
-
-        config =
-            exchange: details.channel
-            binding_key: details.topic
-            queue:  "#{details.channel}:#{details.topic}:#{details.group}"
+        config = @_get_subscriber_config(details)
 
         debug("subscribe to topic")
         @_when_queue(config)
@@ -66,7 +57,29 @@ class Vent
         @
 
     subscribe_stream: (details, cb) ->
-        throw new Error("Not Yet Implemented")
+        return cb(new Error("a topic is required for subscribe")) unless details.topic
+
+        config = @_get_subscriber_config(details)
+
+        debug("subscribe to topic")
+        @_when_queue(config)
+        .then((queue) ->
+            cb(null, new QueueStream(queue))
+        )
+        .fail(cb)
+
+        @
+
+    _get_subscriber_config: (details) ->
+        details.channel ?= @setup.default_channel
+        details.group ?= uuid.v4()
+
+        config =
+            exchange: details.channel
+            binding_key: details.topic
+            queue:  "#{details.channel}:#{details.topic}:#{details.group}"
+
+        config
 
     _when_queue: (config) ->
         unless config.queue of @_queues
@@ -115,9 +128,9 @@ class Vent
         conn_deferred = Q.defer()
         amqp.createConnection({url: @setup.server}, @amqp_options, conn_deferred.resolve)
         .on('error', (err) ->
-                debug(err)
-                conn_deferred.reject(err)
-            )
+            debug(err)
+            conn_deferred.reject(err)
+        )
         conn_deferred.promise
 
     _when_exchange: (config) ->
@@ -145,3 +158,25 @@ exports.Vent = (options) ->
         options = {server: options}
 
     new Vent(options)
+
+class QueueStream extends Readable
+
+    constructor: (@queue)->
+        options = {objectMode: true}
+        Readable.call(this, options)
+        @paused = true
+        queue.subscribe({ack: true, prefetchCount: 1}, @_on_message.bind(@))
+
+    _on_message: (msg) ->
+
+        if @paused
+            # we are backed up, requeue
+            @queue.shift(true, true)
+        else
+            continue_reading = @push(msg)
+            @paused = not continue_reading
+            @queue.shift()
+
+
+    _read: ->
+        @paused = false
