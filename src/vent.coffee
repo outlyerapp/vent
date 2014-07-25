@@ -25,9 +25,14 @@ class Vent
         @_queues = {}
         @_exchanges = {}
 
-    publish: (details) ->
-        return cb(new Error("a topic is required for publish")) unless details.topic
-        return cb(new Error("a message is required for pulish")) unless details.message
+    publish: (details, message) ->
+        throw new Error("publish details missing") unless details
+
+        details = @_decode_details(details)
+        details.message = message if message
+
+        throw new Error("a topic is required for publish") unless details.topic
+        throw new Error("a message is required for pulish") unless details.message
 
         details.channel ?= @setup._default_channel
 
@@ -35,7 +40,7 @@ class Vent
             exchange: details.channel
             routing_key: details.topic
 
-        debug("publish message")
+        debug("publish message %j", {details, message})
         @_when_exchange(config)
         .then((exchange) ->
             exchange.publish(config.routing_key, details.message)
@@ -43,12 +48,21 @@ class Vent
 
         @
 
-    subscribe: (details, cb) ->
-        return cb(new Error("a topic is required for subscribe")) unless details.topic
+    subscribe: (details, group, cb) ->
+        throw new Error("subscribe details missing") unless details
+        unless cb
+            cb = group
+            group = null
+
+        details = @_decode_details(details)
+        details.group = group if group
+
+        throw new Error("a topic is required for subscribe") unless details.topic
+        throw new Error("subscribe callback missing") unless typeof(cb) is "function"
 
         config = @_get_subscriber_config(details)
 
-        debug("subscribe to topic")
+        debug("subscribe to topic %j", details)
         @_when_queue(config)
         .then((queue) ->
             queue.subscribe(cb)
@@ -69,6 +83,16 @@ class Vent
         .fail(cb)
 
         @
+
+    _decode_details: (details) ->
+        return details unless typeof(details) is 'string'
+
+        decoded = details.split(':')
+        switch decoded.length
+            when 1 then {topic: decoded[0]}
+            when 2 then {channel: decoded[0], topic: decoded[1]}
+            when 3 then {channel: decoded[0], topic: decoded[1], group: decoded[2]}
+            else {}
 
     _get_subscriber_config: (details) ->
         details.channel ?= @setup.default_channel

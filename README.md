@@ -37,3 +37,8 @@ vent.publish(
         hey: "whats up!!"
 )
 ```
+
+
+### TODO
+- add more 'debug' logging
+- update examples colon-string event details "channel:topic:group", e.g. "user:destoryed"
