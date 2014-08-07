@@ -70,12 +70,21 @@ class Vent
 
         @
 
-    subscribe_stream: (details, cb) ->
-        return cb(new Error("a topic is required for subscribe")) unless details.topic
+    subscribe_stream: (details, group, cb) ->
+        throw new Error("subscribe details missing") unless details
+        unless cb
+            cb = group
+            group = null
+
+        details = @_decode_details(details)
+        details.group = group if group
+
+        throw new Error("a topic is required for subscribe") unless details.topic
+        throw new Error("subscribe callback missing") unless typeof(cb) is "function"
 
         config = @_get_subscriber_config(details)
 
-        debug("subscribe to topic")
+        debug("stream subscribe to topic %j", details)
         @_when_queue(config)
         .then((queue) ->
             cb(null, new QueueStream(queue))
@@ -120,7 +129,6 @@ class Vent
     _create_queue_instance: (config, connection) ->
         debug("create queue instance: %s", config.queue)
         options =
-            durable: true
             autoDelete: true
 
         queue_deferred = Q.defer()
@@ -170,7 +178,6 @@ class Vent
         @_when_connection().then((connection) ->
             options =
                 type: 'topic'
-                durable: true
                 autoDelete: true
 
             connection.exchange(config.exchange, options, exch_deferred.resolve)
@@ -195,7 +202,11 @@ class QueueStream extends Readable
 
         if @paused
             # we are backed up, requeue
-            @queue.shift(true, true)
+            # so that we dont just spend the whole time churning the queue
+            # pause before requeueing
+            setTimeout( =>
+                @queue.shift(true, true)
+            , 100)
         else
             continue_reading = @push(msg)
             @paused = not continue_reading

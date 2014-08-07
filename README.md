@@ -39,6 +39,9 @@ vent.publish(
 ```
 
 
-### TODO
-- add more 'debug' logging
-- update examples colon-string event details "channel:topic:group", e.g. "user:destoryed"
+### colon separated option
+you can also specify the publish/subscribe option with a colon separated string, for convenience
+in the format "channel:topic:group"
+```
+vent.publish("random:stuff.happening", {message: hey: "whats up!!"})
+vent.subscribe("random:#:server", event_handler)
