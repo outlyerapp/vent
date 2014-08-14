@@ -45,7 +45,10 @@ class Vent
         .then((exchange) ->
             exchange.publish(config.routing_key, details.message)
         )
-
+        .fail((err) ->
+                console.error(err)
+                cb(err)
+            )
         @
 
     subscribe: (details, group, cb) ->
@@ -66,6 +69,10 @@ class Vent
         @_when_queue(config)
         .then((queue) ->
             queue.subscribe(cb)
+        )
+        .fail((err) ->
+            console.error(err)
+            cb(err)
         )
 
         @
@@ -89,7 +96,10 @@ class Vent
         .then((queue) ->
             cb(null, new QueueStream(queue))
         )
-        .fail(cb)
+        .fail((err) ->
+            console.error(err)
+            cb(err)
+        )
 
         @
 
@@ -160,7 +170,7 @@ class Vent
         conn_deferred = Q.defer()
         amqp.createConnection({url: @setup.server}, @amqp_options, conn_deferred.resolve)
         .on('error', (err) ->
-            debug(err)
+            console.error(err)
             conn_deferred.reject(err)
         )
         conn_deferred.promise
