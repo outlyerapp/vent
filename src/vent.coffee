@@ -1,8 +1,7 @@
 assert = require('assert')
-debug = require('debug')("amqp-vent")
 amqp = require('amqp')
-amqp_stream = require( 'amqp-stream' )
 Q = require('q')
+{Readable} = require('stream')
 uuid = require('node-uuid')
 
 # use a shared connection per service
@@ -94,7 +93,7 @@ class Vent
         debug("stream subscribe to topic %j", details)
         @_when_queue(config)
         .then((queue) ->
-            amqp_stream({queue}, cb)
+            cb(null, new QueueStream(queue))
         )
         .fail((err) ->
             console.error(err)
@@ -199,3 +198,23 @@ exports.Vent = (options) ->
         options = {server: options}
 
     new Vent(options)
+
+class QueueStream extends Readable
+
+    constructor: (@queue)->
+        options = {objectMode: true}
+        Readable.call(this, options)
+        @paused = true
+        queue.subscribe(@_on_message.bind(@))
+
+    _on_message: (msg) ->
+        if @paused
+            # we are backed up, drop message
+            console.log("stream backed up. Increase stream 'highWaterMark', or start more processors")
+        else
+            continue_reading = @push(msg)
+            @paused = not continue_reading
+
+
+    _read: ->
+        @paused = false
