@@ -1,5 +1,6 @@
 assert = require('assert')
 amqp = require('amqp')
+debug = require('debug')
 Q = require('q')
 {Readable} = require('stream')
 uuid = require('node-uuid')
