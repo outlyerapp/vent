@@ -32,7 +32,7 @@ class Vent
         details.message = message if message
 
         throw new Error("a topic is required for publish") unless details.topic
-        throw new Error("a message is required for pulish") unless details.message
+        throw new Error("a message is required for publish") unless details.message
 
         details.channel ?= @setup._default_channel
 
