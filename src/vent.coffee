@@ -1,204 +1,260 @@
-assert = require('assert')
-amqp = require('amqp')
-debug = require('debug')
-Q = require('q')
-{Readable} = require('stream')
-uuid = require('node-uuid')
+_               = require 'lodash'
+assert          = require 'assert'
+amqp            = require 'amqp'
+{EventEmitter}  = require 'events'
+logger          = require('dl-logger')("dl:jobs")
+Q               = require 'q'
+{Readable}      = require 'stream'
+uuid            = require 'node-uuid'
 
 # use a shared connection per service
 connection = null
 
-class Vent
+class Jobs extends EventEmitter
+    """
+    Jobs a general purpose Pub/Sub event lib hased on AMQP
 
-    constructor: (@setup) ->
-        assert(@setup, "missing setup options")
-        assert(@setup.server, "missing server option")
+    You can subscribe or publish event based on the following concepts
+    ## Channels
+    A channel is used to group common types of event. This maps to a EXCHANGE
+    on both publish and subscribe
 
-        @setup.default_channel ?= "firehose"
+    ## Topics
+    A topic is the event name to be used. This maps to a ROUTING KEY, because
+    of this is supports the same wildcard features of AMQP exchanges.
+    See: https://www.rabbitmq.com/tutorials/tutorial-four-python.html
+
+    ## Groups
+    A group is useful when subscribing to events. Subscribers with the same
+    group name will have (matching) events distributed amongst them. If you
+    do NOT specify a group name a UUID will be used. That subscriber will then
+    recieve all (matching) events
+    When working with a distributed architure you will have several instances
+    of the same worker/service. In some cases you will only want one service
+    to handle a particular event. This is were groups are useful
+
+    ## options
+    durable - is a non-transient setup, meaning that queues and thier content
+              will be persisted through restarts
+    group   - SEE ABOVE
+    """
+
+    constructor: (@setup, options) ->
+        assert _.isObject(@setup), "missing setup options"
+        assert _.isString(@setup.server), "missing server option"
+
+        default_options =
+            channel: "vent"
+            durable: false
+        @options = _.extend(default_options, options)
 
         @amqp_options =
             reconnect: @setup.reconnect || true
             reconnectBackoffStrategy: @setup.backoff_strategy || "linear"
             reconnectBackoffTime: @setup.backoff_time || 500
-            defaultExchangeName: "firehose"
+            defaultExchangeName: @options.channel
 
         @_queues = {}
         @_exchanges = {}
 
-    publish: (details, message) ->
-        throw new Error("publish details missing") unless details
+    publish: (event, payload, cb) ->
+        """
+        publish to event on the specified channel and topic
 
-        details = @_decode_details(details)
-        details.message = message if message
+        "<channel>:<topic>" = event
+        """
+        assert(event, "event required")
+        assert(payload, "payload required")
 
-        throw new Error("a topic is required for publish") unless details.topic
-        throw new Error("a message is required for publish") unless details.message
+        event_options = @_parse_event(event)
+        pub_options = _.extend({}, @options, event_options)
 
-        details.channel ?= @setup._default_channel
+        cb ?= (err, result) ->
+            logger.error({err}, "publishing") if err
 
-        config =
-            exchange: details.channel
-            routing_key: details.topic
+        logger.trace("publish message", {@options, pub_options, payload})
+        @_when_exchange(pub_options)
+            .then (exchange) ->
+                exchange.publish(pub_options.topic, payload, {}, cb)
 
-        debug("publish message %j", {details, message})
-        @_when_exchange(config)
-        .then((exchange) ->
-            exchange.publish(config.routing_key, details.message)
-        )
-        .fail((err) ->
-                console.error(err)
-                cb(err)
-            )
+            .fail cb
         @
 
-    subscribe: (details, group, cb) ->
-        throw new Error("subscribe details missing") unless details
-        unless cb
-            cb = group
-            group = null
+    subscribe: (event, options, listener) ->
+        """
+        subscribe to events on the specified channel and topic
 
-        details = @_decode_details(details)
-        details.group = group if group
+        "<channel>:<topic>" = event
+        {group, durable} = options
+        """
+        unless listener
+            listener = override_options
+            override_options = {}
 
-        throw new Error("a topic is required for subscribe") unless details.topic
-        throw new Error("subscribe callback missing") unless typeof(cb) is "function"
+        assert _.isString(event), "event required"
+        assert _.isFunction(listener), "listener required"
 
-        config = @_get_subscriber_config(details)
+        event_options = @_parse_event(event)
 
-        debug("subscribe to topic %j", details)
-        @_when_queue(config)
-        .then((queue) ->
-            queue.subscribe(cb)
-        )
-        .fail((err) ->
-            console.error(err)
-            cb(err)
-        )
+        # Combine options ordered by scope
+        sub_options = _.extend({}, @options, event_options, options)
+        sub_options.group ?= uuid.v4()
 
+        logger.trace("subscribe to topic", {options})
+        @_when_queue(sub_options)
+            .then (queue) =>
+                queue.subscribe(listener)
+                @emit('bound', {queue})
+
+            .fail (err) ->
+                logger.error({err}, "subscribing") if err
+                @emit('error', err)
         @
 
     subscribe_stream: (details, group, cb) ->
-        throw new Error("subscribe details missing") unless details
-        unless cb
-            cb = group
-            group = null
-
-        details = @_decode_details(details)
-        details.group = group if group
-
-        throw new Error("a topic is required for subscribe") unless details.topic
-        throw new Error("subscribe callback missing") unless typeof(cb) is "function"
-
-        config = @_get_subscriber_config(details)
-
-        debug("stream subscribe to topic %j", details)
-        @_when_queue(config)
-        .then((queue) ->
-            cb(null, new QueueStream(queue))
-        )
-        .fail((err) ->
-            console.error(err)
-            cb(err)
-        )
+        # throw new Error("subscribe details missing") unless details
+        # unless cb
+        #    cb = group
+        #    group = null
+        #
+        # details = @_decode_details(details)
+        # details.group = group if group
+        #
+        # throw new Error("a topic is required for subscribe") unless details.topic
+        # throw new Error("subscribe callback missing") unless typeof(cb) is "function"
+        #
+        # config = @_get_subscriber_config(details)
+        #
+        # logger.trace("stream subscribe to topic %j", details)
+        # @_when_queue(config)
+        # .then((queue) ->
+        #        cb(null, new QueueStream(queue))
+        #    )
+        # .fail((err) ->
+        #        console.error(err)
+        #        cb(err)
+        #    )
 
         @
 
-    _decode_details: (details) ->
-        return details unless typeof(details) is 'string'
-
-        decoded = details.split(':')
+    _parse_event: (event) ->
+        assert _.isString(event), "event string required"
+        decoded = event.split(':')
+        result = {}
         switch decoded.length
-            when 1 then {topic: decoded[0]}
-            when 2 then {channel: decoded[0], topic: decoded[1]}
-            when 3 then {channel: decoded[0], topic: decoded[1], group: decoded[2]}
-            else {}
+            when 1
+                result = {topic: decoded[0]}
+            when 2
+                result = {channel: decoded[0], topic: decoded[1]}
+            when 3
+                result =
+                    channel: decoded[0]
+                    topic:   decoded[1]
+                    group:   decoded[2]
 
-    _get_subscriber_config: (details) ->
-        details.channel ?= @setup.default_channel
-        details.group ?= uuid.v4()
+        assert(result.topic, "topic required")
+        result
 
-        config =
-            exchange: details.channel
-            binding_key: details.topic
-            queue:  "#{details.channel}:#{details.topic}:#{details.group}"
+    _when_queue: (options) ->
+        queue_name = @_generate_queue_name(options)
+        unless queue_name of @_queues
+            @_queues[queue_name] = @_create_queue(options)
 
-        config
+        @_queues[queue_name]
 
-    _when_queue: (config) ->
-        unless config.queue of @_queues
-            @_queues[config.queue] = @_create_queue(config)
+    _generate_queue_name: (options) ->
+        assert _.isString(options.channel), "channel required"
+        assert _.isString(options.topic),   "topic required"
+        assert _.isString(options.group),   "group required"
 
-        @_queues[config.queue]
+        "#{options.channel}:#{options.topic}:#{options.group}"
 
-    _create_queue: (config) ->
-        debug("create queue: %s", config.queue)
+    _create_queue: (options) ->
+        logger.trace("create queue", {options})
         @_when_connection()
-        .then(@_create_queue_instance.bind(@, config))
-        .then(@_bind_queue_exchange.bind(@, config))
+            .then @_create_queue_instance.bind(@, options)
+            .then @_create_exchange_bind.bind(@, options)
 
-    _create_queue_instance: (config, connection) ->
-        debug("create queue instance: %s", config.queue)
-        options =
-            autoDelete: true
+    _create_queue_instance: (options, connection) ->
+        assert _.isBoolean(options.durable), "boolean durable option required"
+        assert _.isObject(connection), "connection required"
+
+        queue_name = @_generate_queue_name(options)
+        queue_opts = {autoDelete: not options.durable, durable: options.durable}
 
         queue_deferred = Q.defer()
-        connection.queue(config.queue, options, queue_deferred.resolve)
+        logger.trace("create queue instance", {queue_name, queue_opts})
+        connection.queue(queue_name, queue_opts, queue_deferred.resolve)
         queue_deferred.promise
 
-    _bind_queue_exchange: (config, queue) ->
-        debug("bind queue to exchange: %s", config.binding_key)
-        @_when_exchange(config)
-        .then((exchange) ->
-            debug("exchange ready, binding")
-            bound_queue_deferred = Q.defer()
-            queue.bind(exchange, config.binding_key)
-            queue.on('queueBindOk', ->
-                debug("queue and exchange bound")
-                bound_queue_deferred.resolve(queue))
-            bound_queue_deferred.promise
-        )
+    _create_exchange_bind: (options, queue) ->
+        @_when_exchange(options)
+            .then @_bind_queue.bind(@, queue, options)
+
+    _bind_queue: (queue, options, exchange) ->
+        assert _.isObject(queue), "queue required"
+        assert _.isObject(exchange), "exchange required"
+        assert _.isString(options.topic), "topic option require"
+
+        binding_key = options.topic
+        bound_queue_deferred = Q.defer()
+
+        logger.trace("binding queue to exchange", {binding_key})
+        queue.bind(exchange, binding_key)
+        queue.on 'queueBindOk', ->
+            logger.trace("queue and exchange bound", {binding_key})
+            bound_queue_deferred.resolve(queue)
+
+        bound_queue_deferred.promise
 
     _when_connection: ->
         connection ?= @_create_connection()
         connection
 
     _create_connection: ->
-        # fine to log the connection string,
-        # since debug is only run in dev
-        debug("creating queue connection")
+        logger.trace("creating queue connection")
 
         conn_deferred = Q.defer()
-        amqp.createConnection({url: @setup.server}, @amqp_options, conn_deferred.resolve)
-        .on('error', (err) ->
-            console.error(err)
-            conn_deferred.reject(err)
-        )
+        settings = {url: @setup.server}
+        amqp.createConnection(settings, @amqp_options, conn_deferred.resolve)
+            .on 'error', (err) ->
+                logger.error({err}, "create connection")
+                conn_deferred.reject(err)
+
         conn_deferred.promise
 
-    _when_exchange: (config) ->
-        unless config.exchange of @_exchanges
-            @_exchanges[config.exchange] = @_create_exchange(config)
+    _when_exchange: (options) ->
+        assert _.isString(options.channel), "channel required"
 
-        @_exchanges[config.exchange]
+        unless options.channel of @_exchanges
+            @_exchanges[options.channel] = @_create_exchange(options)
 
-    _create_exchange: (config) ->
-        debug("create exchange: %s", config.exchange)
+        @_exchanges[options.channel]
+
+    _create_exchange: (options) ->
+        @_when_connection()
+            .then @_create_exchange_instance.bind(@, options)
+
+    _create_exchange_instance: (options, connection) ->
+        assert _.isString(options.channel), "boolean channel option required"
+
+        logger.trace("create exchange: %s", options.exchange)
 
         exch_deferred = Q.defer()
-        @_when_connection().then((connection) ->
-            options =
-                type: 'topic'
-                autoDelete: true
+        exch_name = options.channel
+        exch_options =
+            type: 'topic'
+            autoDelete: not options.durable,
+            durable: options.durable
 
-            connection.exchange(config.exchange, options, exch_deferred.resolve)
-        )
+        logger.trace("create exchange instance", {exch_name, exch_options})
+        connection.exchange(options.channel, options, exch_deferred.resolve)
+
         exch_deferred.promise
 
-exports.Vent = (options) ->
-    if typeof(options) is "string"
-        options = {server: options}
-
-    new Vent(options)
+module.exports = (setup, options) ->
+    setup = {server: setup} if _.isString(setup)
+    new Jobs(setup, options)
 
 class QueueStream extends Readable
 
@@ -211,7 +267,9 @@ class QueueStream extends Readable
     _on_message: (msg) ->
         if @paused
             # we are backed up, drop message
-            console.log("stream backed up. Increase stream 'highWaterMark', or start more processors")
+            msg = "stream backed up. Increase stream 'highWaterMark',
+                or start more processors"
+            logger.warn(msg)
         else
             continue_reading = @push(msg)
             @paused = not continue_reading

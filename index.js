@@ -1,2 +1,1 @@
-
-module.exports = require('./lib/vent');
+exports.Vent = require('./lib/vent');
