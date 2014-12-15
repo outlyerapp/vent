@@ -1,7 +1,6 @@
-config = require 'dl-config'
 {Vent} = require 'amqp-vent'
 
-jobs = Vent(config.bus.queue, {durable: true})
+jobs = Vent("amqp://guest:guest@localhost:5672/bus", {durable: true})
 
 options = {durable: true, group: "worker"}
 jobs.subscribe "job-metrics:agent", options , (msg) ->
