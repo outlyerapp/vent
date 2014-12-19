@@ -10,7 +10,7 @@ uuid            = require 'node-uuid'
 # use a shared connection per service
 connection = null
 
-class Jobs extends EventEmitter
+class Vent extends EventEmitter
     """
     Jobs a general purpose Pub/Sub event lib hased on AMQP
 
@@ -54,6 +54,7 @@ class Jobs extends EventEmitter
             reconnectBackoffTime: @setup.backoff_time || 500
             defaultExchangeName: @options.channel
 
+        @connection = null
         @_queues = {}
         @_exchanges = {}
 
@@ -86,10 +87,15 @@ class Jobs extends EventEmitter
 
         "<channel>:<topic>" = event
         {group, durable} = options
+        or
+        "<group_name>" = options
         """
         unless listener
-            listener = override_options
-            override_options = {}
+            listener = options
+            options = {}
+
+        if _.isString(options)
+            options = {group: options}
 
         assert _.isString(event), "event required"
         assert _.isFunction(listener), "listener required"
@@ -111,29 +117,40 @@ class Jobs extends EventEmitter
                 @emit('error', err)
         @
 
-    subscribe_stream: (details, group, cb) ->
-        # throw new Error("subscribe details missing") unless details
-        # unless cb
-        #    cb = group
-        #    group = null
-        #
-        # details = @_decode_details(details)
-        # details.group = group if group
-        #
-        # throw new Error("a topic is required for subscribe") unless details.topic
-        # throw new Error("subscribe callback missing") unless typeof(cb) is "function"
-        #
-        # config = @_get_subscriber_config(details)
-        #
-        # logger.trace("stream subscribe to topic %j", details)
-        # @_when_queue(config)
-        # .then((queue) ->
-        #        cb(null, new QueueStream(queue))
-        #    )
-        # .fail((err) ->
-        #        console.error(err)
-        #        cb(err)
-        #    )
+    subscribe_stream: (event, options, cb) ->
+        """
+        subscribe to a stream of events on the specified channel and topic
+
+        "<channel>:<topic>" = event
+        {group, durable} = options
+        or
+        "<group_name>" = options
+        """
+        unless listener
+            listener = override_options
+            override_options = {}
+
+        if _.isString(options)
+            options = {group: options}
+
+        assert _.isString(event), "event required"
+        assert _.isFunction(cb), "completion required"
+
+        event_options = @_parse_event(event)
+
+        # Combine options ordered by scope
+        sub_options = _.extend({}, @options, event_options, options)
+        sub_options.group ?= uuid.v4()
+
+        logger.trace("subscribe to topic stream", {options})
+        @_when_queue(sub_options)
+            .then (queue) =>
+                cb(null, new QueueStream(queue))
+                @emit('bound', {queue})
+
+            .fail (err) ->
+                logger.error({err}, "subscribing to stream") if err
+                @emit('error', err)
 
         @
 
@@ -208,14 +225,14 @@ class Jobs extends EventEmitter
         bound_queue_deferred.promise
 
     _when_connection: ->
-        connection ?= @_create_connection()
-        connection
+        @connection ?= @_create_connection()
+        @connection
 
     _create_connection: ->
-        logger.trace("creating queue connection")
 
         conn_deferred = Q.defer()
         settings = {url: @setup.server}
+        logger.debug("creating queue connection", {settings})
         amqp.createConnection(settings, @amqp_options, conn_deferred.resolve)
             .on 'error', (err) ->
                 logger.error({err}, "create connection")
@@ -254,7 +271,7 @@ class Jobs extends EventEmitter
 
 module.exports = (setup, options) ->
     setup = {server: setup} if _.isString(setup)
-    new Jobs(setup, options)
+    new Vent(setup, options)
 
 class QueueStream extends Readable
 
