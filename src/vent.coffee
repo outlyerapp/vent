@@ -233,10 +233,21 @@ class Vent extends EventEmitter
         conn_deferred = Q.defer()
         settings = {url: @setup.server}
         logger.debug("creating queue connection", {settings})
-        amqp.createConnection(settings, @amqp_options, conn_deferred.resolve)
-            .on 'error', (err) ->
-                logger.error({err}, "create connection")
-                conn_deferred.reject(err)
+        conn = amqp.createConnection(settings,
+                                    @amqp_options,
+                                    conn_deferred.resolve)
+        conn.on 'error', (err) ->
+            logger.error({err}, "amqp connection error")
+            conn_deferred.reject(err)
+
+        conn.on 'ready', ->
+            logger.info 'amqp connection ready'
+
+        conn.on  'heartbeat', ->
+            logger.debug 'amqp connection heartbeat'
+
+        conn.on 'close', ->
+            logger.info 'amqp connection closed'
 
         conn_deferred.promise
 
