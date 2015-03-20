@@ -55,6 +55,7 @@ class Vent extends EventEmitter
             defaultExchangeName: @options.channel
 
         @connection = null
+        @conn_count = 0
         @_queues = {}
         @_exchanges = {}
 
@@ -145,7 +146,7 @@ class Vent extends EventEmitter
         logger.trace("subscribe to topic stream", {options})
         @_when_queue(sub_options)
             .then (queue) =>
-                cb(null, new QueueStream(queue))
+                cb(null, new QueueStream(queue, options))
                 @emit('bound', {queue})
 
             .fail (err) ->
@@ -229,10 +230,10 @@ class Vent extends EventEmitter
         @connection
 
     _create_connection: ->
-
         conn_deferred = Q.defer()
         settings = {url: @setup.server}
-        logger.debug("creating queue connection", {settings})
+        @conn_count++
+        logger.debug("creating queue connection", {settings, @conn_count})
         conn = amqp.createConnection(settings,
                                     @amqp_options,
                                     conn_deferred.resolve)
@@ -286,22 +287,20 @@ module.exports = (setup, options) ->
 
 class QueueStream extends Readable
 
-    constructor: (@queue)->
-        options = {objectMode: true}
-        Readable.call(this, options)
-        @paused = true
+    constructor: (queue, options)->
+        highWaterMark = options.high_watermark or 16
+        super({objectMode: true, highWaterMark})
+        @continue = true
         queue.subscribe(@_on_message.bind(@))
 
-    _on_message: (msg) ->
-        if @paused
-            # we are backed up, drop message
-            msg = "stream backed up. Increase stream 'highWaterMark',
-                or start more processors"
-            logger.warn(msg)
+    _on_message: (msg) =>
+        if @continue
+            @continue = @push(msg)
         else
-            continue_reading = @push(msg)
-            @paused = not continue_reading
-
+            # TODO add support to re-queue message
+            # we are backed up, drop message
+            logger.warn("stream backed up, dropping message")
+            @emit('spill', msg)
 
     _read: ->
-        @paused = false
+        @continue = true
