@@ -299,7 +299,7 @@ class QueueStream extends Readable
         else
             # TODO add support to re-queue message
             # we are backed up, drop message
-            logger.warn("stream backed up, dropping message")
+            logger.debug("stream backed up, dropping message")
             @emit('spill', msg)
 
     _read: ->
