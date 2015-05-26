@@ -1,1 +1,1 @@
-exports.Vent = require('./lib/vent');
+exports.Vent = require('./src/vent');

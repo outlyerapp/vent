@@ -59,7 +59,7 @@ class Vent extends EventEmitter
         @_queues = {}
         @_exchanges = {}
 
-    publish: (event, payload, cb) ->
+    publish: (event, payload, options, cb) ->
         """
         publish to event on the specified channel and topic
 
@@ -68,16 +68,21 @@ class Vent extends EventEmitter
         assert(event, "event required")
         assert(payload, "payload required")
 
-        event_options = @_parse_event(event)
-        pub_options = _.extend({}, @options, event_options)
+        if _.isFunction(options)
+            cb = options
+            options = {}
 
-        cb ?= (err, result) ->
-            logger.error({err}, "publishing") if err
+        event_options = @_parse_event(event)
+        pub_options = _.extend({}, @options, event_options, options)
+
+        _cb = (errors) ->
+            return unless cb
+            if errors then cb(new Error('message publish fail')) else cb()
 
         logger.trace("publish message", {@options, pub_options, payload})
         @_when_exchange(pub_options)
             .then (exchange) ->
-                exchange.publish(pub_options.topic, payload, {}, cb)
+                exchange.publish(pub_options.topic, payload, {}, _cb)
 
             .fail cb
         @
@@ -281,7 +286,7 @@ class Vent extends EventEmitter
         exch_deferred = Q.defer()
         exch_name = options.channel
         exch_options =
-            type: 'topic'
+            type: options.type or 'topic'
             autoDelete: not options.durable,
             durable: options.durable
 
