@@ -58,6 +58,15 @@ class Vent extends EventEmitter
         @conn_count = 0
         @_queues = {}
         @_exchanges = {}
+        @_auto_delete = []
+
+        process.on 'SIGINT', @_cleanup
+
+    _cleanup: =>
+        logger.info('cleaning up auto_delete queues', @_auto_delete.length)
+        for item in @_auto_delete
+            logger.info('destroying queue', item?.name)
+            item?.destroy()
 
     publish: (event, payload, options, cb) ->
         """
@@ -216,7 +225,12 @@ class Vent extends EventEmitter
 
         queue_deferred = Q.defer()
         logger.trace("create queue instance", {queue_name, queue_opts})
-        connection.queue(queue_name, queue_opts, queue_deferred.resolve)
+        connection.queue queue_name, queue_opts, (queue) =>
+            if queue_opts.autoDelete
+                logger.debug('list queue for auto_delete', queue.name)
+                @_auto_delete.push(queue)
+            queue_deferred.resolve(queue)
+
         queue_deferred.promise
 
     _create_exchange_bind: (options, queue) ->
