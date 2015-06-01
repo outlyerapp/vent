@@ -58,13 +58,13 @@ class Vent extends EventEmitter
         @conn_count = 0
         @_queues = {}
         @_exchanges = {}
-        @_auto_perge = []
+        @_auto_purge = []
 
         process.on 'SIGINT', @_cleanup
 
     _cleanup: =>
-        logger.info('cleaning up purges queues', @_auto_perge.length)
-        for item in @_auto_perge
+        logger.info('cleaning up purges queues', @_auto_purge.length)
+        for item in @_auto_purge
             logger.info('destroying queue', item?.name)
             item?.destroy()
 
@@ -226,9 +226,9 @@ class Vent extends EventEmitter
         queue_deferred = Q.defer()
         logger.trace("create queue instance", {queue_name, queue_opts})
         connection.queue queue_name, queue_opts, (queue) =>
-            if options.auto_perge
-                logger.debug('list queue for auto_perge', queue.name)
-                @_auto_perge.push(queue)
+            if options.auto_purge
+                logger.debug('list queue for auto_purge', queue.name)
+                @_auto_purge.push(queue)
             queue_deferred.resolve(queue)
 
         queue_deferred.promise
@@ -319,7 +319,7 @@ class Vent extends EventEmitter
             durable: options.durable
 
         logger.trace("create exchange instance", {exch_name, exch_options})
-        connection.exchange(options.channel, options, exch_deferred.resolve)
+        connection.exchange(options.channel, exch_options, exch_deferred.resolve)
 
         exch_deferred.promise
 
