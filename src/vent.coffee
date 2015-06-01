@@ -300,22 +300,9 @@ class Vent extends EventEmitter
         exch_deferred = Q.defer()
         exch_name = options.channel
 
-        """
-        Disable auto-delete on exchange, since it can cause craziness under load
-        https://github.com/zentrope/clj-zentrope-mq/issues/1
-
-        When a consumer or publisher declares an exchange,
-        it sets the auto-delete flag to "true". This is a flag associated with a
-        channel (which are multiplexed across a single connection to RabbitMQ).
-        When one of those channels is closed, it deletes the exchange.
-        This causes ALL other channels using that exchange to be closed,
-        breaking connections, too, I think, thus forcing all my apps (anyway)
-        to re-negotation a new connection.
-        The solution is to not allow auto-delete on the exchange.
-        """
         exch_options =
             type: options.type or 'topic'
-            autoDelete: false,
+            autoDelete: not options.durable
             durable: options.durable
 
         logger.trace("create exchange instance", {exch_name, exch_options})
