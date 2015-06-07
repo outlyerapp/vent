@@ -2,7 +2,7 @@
   "author": "Colin Hemmings <colin.hemmings@dataloop.io> (www.dataloop.io)",
   "name": "amqp-vent",
   "description": "PubSub message bus over rabbitmq",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "repository": {
     "url": "https://github.com/dataloop/vent"
   },

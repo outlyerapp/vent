@@ -302,11 +302,11 @@ class Vent extends EventEmitter
 
         exch_options =
             type: options.type or 'topic'
-            autoDelete: not options.durable
+            autoDelete: false
             durable: options.durable
 
         logger.trace("create exchange instance", {exch_name, exch_options})
-        connection.exchange(options.channel, options, exch_deferred.resolve)
+        connection.exchange(options.channel, exch_options, exch_deferred.resolve)
 
         exch_deferred.promise
 
