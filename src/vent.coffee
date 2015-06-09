@@ -217,11 +217,10 @@ class Vent extends EventEmitter
         if options.ttl
             args = {"x-message-ttl": options.ttl}
 
-        queue_opts = {
+        queue_opts =
             autoDelete: not options.durable
             durable: options.durable
             'arguments': args
-        }
 
         queue_deferred = Q.defer()
         logger.trace("create queue instance", {queue_name, queue_opts})
@@ -316,20 +315,19 @@ module.exports = (setup, options) ->
 
 class QueueStream extends Readable
 
-    constructor: (queue, options)->
+    constructor: (@queue, options)->
         highWaterMark = options.high_watermark or 16
         super({objectMode: true, highWaterMark})
-        @continue = true
-        queue.subscribe(@_on_message.bind(@))
+
+        # enable ack so the stream can request messages when its ready
+        sub_options =
+            ack: true
+            prefetchCount: options.prefetch or 1
+
+        @queue.subscribe(sub_options, @_on_message.bind(@))
 
     _on_message: (msg) =>
-        if @continue
-            @continue = @push(msg)
-        else
-            # TODO add support to re-queue message
-            # we are backed up, drop message
-            logger.debug("stream backed up, dropping message")
-            @emit('spill', msg)
+        @push(msg)
 
     _read: ->
-        @continue = true
+        @queue.shift()
