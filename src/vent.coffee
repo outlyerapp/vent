@@ -213,10 +213,14 @@ class Vent extends EventEmitter
 
         queue_name = @_generate_queue_name(options)
 
+        args = options.args or {}
+        if options.ttl?
+            args['x-message-ttl'] = options.ttl
+
         queue_opts =
             autoDelete: not options.durable
             durable: options.durable
-            'arguments': options.args
+            'arguments': args
 
         queue_deferred = Q.defer()
         logger.trace("create queue instance", {queue_name, queue_opts})
