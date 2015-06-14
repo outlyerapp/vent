@@ -59,6 +59,7 @@ class Vent extends EventEmitter
         @_queues = {}
         @_exchanges = {}
         @_auto_purge = []
+        @_subscribed_queues = []
 
         process.on 'SIGINT', @_cleanup
 
@@ -125,12 +126,27 @@ class Vent extends EventEmitter
         @_when_queue(sub_options)
             .then (queue) =>
                 queue.subscribe(listener)
+                @_remember_subscription(event, listener, queue)
                 @emit('bound', {queue})
 
             .fail (err) ->
                 logger.error({err}, "subscribing") if err
                 @emit('error', err)
         @
+
+    _remember_subscription: (event, listener, queue) ->
+        unless @_subscribed_queues[event]
+            @_subscribed_queues[event] = []
+        @_subscribed_queues[event].push([listener, queue])
+
+    unsubscribe: (event, listener) ->
+        return unless @_subscribed_queues[event]
+        @_subscribed_queues[event] = @_subscribed_queues[event].filter (tuple) ->
+            {l, queue} = tuple
+            if l is listener
+                queue.destroy()
+                return false
+            true
 
     subscribe_stream: (event, options, cb) ->
         """
