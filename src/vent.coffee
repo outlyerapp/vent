@@ -59,6 +59,7 @@ class Vent extends EventEmitter
         @_queues = {}
         @_exchanges = {}
         @_auto_purge = []
+        @_subscribed_queues = {}
 
         process.on 'SIGINT', @_cleanup
 
@@ -119,17 +120,49 @@ class Vent extends EventEmitter
 
         # Combine options ordered by scope
         sub_options = _.extend({}, @options, event_options, options)
+        auto_purge = sub_options.auto_purge and not sub_options.group?
         sub_options.group ?= uuid.v4()
 
         logger.trace("subscribe to topic", {options})
         @_when_queue(sub_options)
             .then (queue) =>
                 queue.subscribe(listener)
+                    .addCallback((ok) =>
+                        ctag = ok.consumerTag
+                        @_remember_subscription(event, listener, {queue, auto_purge, ctag})
+                    )
                 @emit('bound', {queue})
 
             .fail (err) ->
                 logger.error({err}, "subscribing") if err
                 @emit('error', err)
+        @
+
+    _remember_subscription: (event, listener, options) ->
+        unless @_subscribed_queues[event]
+            @_subscribed_queues[event] = []
+        @_subscribed_queues[event].push([listener, options])
+
+    unsubscribe: (event, listener) ->
+        return unless @_subscribed_queues[event]
+
+        unsubscribe = (options) =>
+            {queue, auto_purge, ctag} = options
+            queue.unsubscribe(ctag)
+            # If the queue is supposed to be auto_pruged, lets clean it up
+            if auto_purge
+                auto_purge_idx = @_auto_purge.indexOf()
+                if auto_purge_idx >= 0
+                    @_auto_purge.splice(auto_purge_idx, 1)
+                delete @_queues[queue.name] if @_queues[queue.name]?
+                queue.destroy()
+
+        @_subscribed_queues[event] = @_subscribed_queues[event].filter (tuple) ->
+            [l, options] = tuple
+            if l is listener
+                unsubscribe(options)
+                return false
+            true
         @
 
     subscribe_stream: (event, options, cb) ->
