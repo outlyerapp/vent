@@ -250,8 +250,13 @@ class Vent extends EventEmitter
         if options.ttl?
             args['x-message-ttl'] = options.ttl
 
+
+        auto_delete = not options.durable
+        if options.auto_delete?
+            auto_delete = options.auto_delete
+
         queue_opts =
-            autoDelete: not options.durable
+            autoDelete: auto_delete
             durable: options.durable
             'arguments': args
 
