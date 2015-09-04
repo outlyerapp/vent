@@ -1,14 +1,13 @@
 _               = require 'lodash'
 assert          = require 'assert'
-amqp            = require 'amqp'
 {EventEmitter}  = require 'events'
-logger          = require('dl-logger')("dl:jobs")
+logger          = require('dl-logger')("amqp-vent")
 Q               = require 'q'
 {Readable}      = require 'stream'
 uuid            = require 'node-uuid'
 
-# use a shared connection per service
-connection = null
+Pool            = require('./pool')
+
 
 class Vent extends EventEmitter
     """
@@ -39,23 +38,22 @@ class Vent extends EventEmitter
     group   - SEE ABOVE
     """
 
-    constructor: (@setup, options) ->
-        assert _.isObject(@setup), "missing setup options"
-        assert _.isString(@setup.server), "missing server option"
+    constructor: (setup, options) ->
+        assert _.isObject(setup), "missing setup options"
+        assert _.isString(setup.server) or _.isArray(setup.server), "missing server option"
 
         default_options =
             channel: "vent"
             durable: false
         @options = _.extend(default_options, options)
 
-        @amqp_options =
-            reconnect: @setup.reconnect || true
-            reconnectBackoffStrategy: @setup.backoff_strategy || "linear"
-            reconnectBackoffTime: @setup.backoff_time || 500
+        amqp_options =
+            reconnect: setup.reconnect || true
+            reconnectBackoffStrategy: setup.backoff_strategy || "linear"
+            reconnectBackoffTime: setup.backoff_time || 500
             defaultExchangeName: @options.channel
 
-        @connection = null
-        @conn_count = 0
+        @pool = new Pool(setup.server, amqp_options)
         @_queues = {}
         @_exchanges = {}
         @_auto_purge = []
@@ -236,7 +234,7 @@ class Vent extends EventEmitter
 
     _create_queue: (options) ->
         logger.trace("create queue", {options})
-        @_when_connection()
+        @pool.when_connection(options)
             .then @_create_queue_instance.bind(@, options)
             .then @_create_exchange_bind.bind(@, options)
 
@@ -290,33 +288,6 @@ class Vent extends EventEmitter
 
         bound_queue_deferred.promise
 
-    _when_connection: ->
-        @connection ?= @_create_connection()
-        @connection
-
-    _create_connection: ->
-        conn_deferred = Q.defer()
-        settings = {url: @setup.server}
-        @conn_count++
-        logger.debug("creating queue connection", {settings, @conn_count})
-        conn = amqp.createConnection(settings,
-                                    @amqp_options,
-                                    conn_deferred.resolve)
-        conn.on 'error', (err) ->
-            logger.error({err}, "amqp connection error")
-            conn_deferred.reject(err)
-
-        conn.on 'ready', ->
-            logger.info 'amqp connection ready'
-
-        conn.on  'heartbeat', ->
-            logger.debug 'amqp connection heartbeat'
-
-        conn.on 'close', ->
-            logger.info 'amqp connection closed'
-
-        conn_deferred.promise
-
     _when_exchange: (options) ->
         assert _.isString(options.channel), "channel required"
 
@@ -326,7 +297,7 @@ class Vent extends EventEmitter
         @_exchanges[options.channel]
 
     _create_exchange: (options) ->
-        @_when_connection()
+        @pool.when_connection(options)
             .then @_create_exchange_instance.bind(@, options)
 
     _create_exchange_instance: (options, connection) ->
@@ -348,7 +319,7 @@ class Vent extends EventEmitter
         exch_deferred.promise
 
 module.exports = (setup, options) ->
-    setup = {server: setup} if _.isString(setup)
+    setup = {server: setup} if _.isString(setup) or Array.isArray(setup)
     new Vent(setup, options)
 
 class QueueStream extends Readable
