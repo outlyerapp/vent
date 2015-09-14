@@ -33,7 +33,9 @@ class Pool
         unless options?.group?
             return Math.floor(Math.random() * @size)
 
-        return hash(options.group) % @size
+        h = hash(options.group)
+        h ^= (process.env.PORT or '0') if options.partition
+        h % @size
 
     _create_connection: (server) ->
         conn_deferred = Q.defer()
