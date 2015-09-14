@@ -1,3 +1,4 @@
+os              = require 'os'
 _               = require 'lodash'
 assert          = require 'assert'
 amqp            = require 'amqp'
@@ -232,7 +233,13 @@ class Vent extends EventEmitter
         assert _.isString(options.topic),   "topic required"
         assert _.isString(options.group),   "group required"
 
-        "#{options.channel}:#{options.topic}:#{options.group}"
+        name = "#{options.channel}:#{options.topic}:#{options.group}"
+        if options.partition?
+            partiotion_key = 0
+            for l in "#{os.hostname()}:#{process.env.PORT || '0'}"
+                partiotion_key ^= l.charCodeAt(0)
+            name += ":p#{partiotion_key % 4}"
+        name
 
     _create_queue: (options) ->
         logger.trace("create queue", {options})
@@ -279,10 +286,10 @@ class Vent extends EventEmitter
         assert _.isObject(exchange), "exchange required"
         assert _.isString(options.topic), "topic option require"
 
-        binding_key = options.topic
+        binding_key = if options.partition then "10" else options.topic
         bound_queue_deferred = Q.defer()
 
-        logger.trace("binding queue to exchange", {binding_key})
+        logger.trace("binding queue to exchange", {queue: queue.name, exchange: exchange.name, binding_key})
         queue.bind(exchange, binding_key)
         queue.on 'queueBindOk', ->
             logger.trace("queue and exchange bound", {binding_key})
@@ -335,17 +342,42 @@ class Vent extends EventEmitter
         logger.trace("create exchange: %s", options.exchange)
 
         exch_deferred = Q.defer()
+        promise = exch_deferred.promise
         exch_name = options.channel
-
         exch_options =
             type: options.type or 'topic'
             autoDelete: false
             durable: options.durable
 
-        logger.trace("create exchange instance", {exch_name, exch_options})
-        connection.exchange(options.channel, exch_options, exch_deferred.resolve)
+        if options.partition?
+            exch_name = "#{exch_name}.#{options.group}-splitter"
+            _.extend(exch_options,
+                type: 'x-consistent-hash'
+                autoDelete: true
+            )
+            exchange = null
+            promise = promise.then @_create_bound_exchange.bind(@, options, connection)
 
-        exch_deferred.promise
+        logger.trace("create exchange instance", {exch_name, exch_options})
+        connection.exchange(exch_name, exch_options, exch_deferred.resolve)
+        promise
+
+    _create_bound_exchange: (options, connection, exchange) ->
+        @_create_exchange_instance(_.omit(options, 'partition'), connection)
+            .then @_bind_exchange.bind(@, exchange, options)
+
+    _bind_exchange: (exchange, options, source) ->
+        assert _.isString(options.topic), "topic option require"
+
+        binding_key = options.topic
+        exchange_deferred = Q.defer()
+
+        logger.trace("binding exchange to other exchange", {exchange: exchange.name, source: source.name, binding_key})
+        exchange.bind(source, binding_key, ->
+            exchange_deferred.resolve(exchange)
+        )
+        exchange_deferred.promise
+
 
 module.exports = (setup, options) ->
     setup = {server: setup} if _.isString(setup)
