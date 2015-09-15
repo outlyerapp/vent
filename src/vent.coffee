@@ -238,7 +238,7 @@ class Vent extends EventEmitter
             partition_key = 0
             for l in "#{os.hostname()}:#{process.env.PORT || '0'}"
                 partition_key ^= l.charCodeAt(0)
-            name += ":p#{partition_key % 4}"
+            name += ":p#{partition_key % options.partition}"
         name
 
     _create_queue: (options) ->
