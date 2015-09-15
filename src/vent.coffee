@@ -235,10 +235,10 @@ class Vent extends EventEmitter
 
         name = "#{options.channel}:#{options.topic}:#{options.group}"
         if options.partition?
-            partiotion_key = 0
+            partition_key = 0
             for l in "#{os.hostname()}:#{process.env.PORT || '0'}"
-                partiotion_key ^= l.charCodeAt(0)
-            name += ":p#{partiotion_key % 4}"
+                partition_key ^= l.charCodeAt(0)
+            name += ":p#{partition_key % 4}"
         name
 
     _create_queue: (options) ->
