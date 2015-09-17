@@ -50,7 +50,7 @@ class Vent extends EventEmitter
         @options = _.extend(default_options, options)
 
         @amqp_options =
-            reconnect: @setup.reconnect || true
+            reconnect: @setup.reconnect || @options.reconnect || true
             reconnectBackoffStrategy: @setup.backoff_strategy || "linear"
             reconnectBackoffTime: @setup.backoff_time || 500
             defaultExchangeName: @options.channel
