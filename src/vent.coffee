@@ -112,6 +112,7 @@ class Vent extends EventEmitter
 
         # Combine options ordered by scope
         sub_options = _.extend({}, @options, event_options, options)
+        sub_options.auto_delete = false if sub_options.group?
         sub_options.group ?= uuid.v4()
 
         logger.trace("subscribe to topic", {options})
