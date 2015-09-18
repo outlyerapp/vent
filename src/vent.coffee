@@ -1,18 +1,23 @@
 os              = require 'os'
-_               = require 'lodash'
 assert          = require 'assert'
-amqp            = require 'amqp'
 {EventEmitter}  = require 'events'
-logger          = require('dl-logger')("dl:jobs")
-Q               = require 'q'
 {Readable}      = require 'stream'
+_               = require 'lodash'
+amqp            = require 'amqplib'
+logger          = require('dl-logger')("dl:vent")
 uuid            = require 'node-uuid'
+w               = require 'when'
 
-# use a shared connection per service
-connection = null
+
+DEFAULT_OPTIONS =
+    channel: 'vent'
+    reconnect: true
+    heartbeat: 5
+    durable: false
+
 
 class Vent extends EventEmitter
-    """
+    ###
     Jobs a general purpose Pub/Sub event lib hased on AMQP
 
     You can subscribe or publish event based on the following concepts
@@ -38,35 +43,21 @@ class Vent extends EventEmitter
     durable - is a non-transient setup, meaning that queues and thier content
               will be persisted through restarts
     group   - SEE ABOVE
-    """
+    ###
 
-    constructor: (@setup, options) ->
-        assert _.isObject(@setup), "missing setup options"
-        assert _.isString(@setup.server), "missing server option"
-
-        default_options =
-            channel: "vent"
-            durable: false
-        @options = _.extend(default_options, options)
-
-        @amqp_options =
-            reconnect: @setup.reconnect || @options.reconnect || true
-            reconnectBackoffStrategy: @setup.backoff_strategy || "linear"
-            reconnectBackoffTime: @setup.backoff_time || 500
-            defaultExchangeName: @options.channel
-
-        @connection = null
-        @conn_count = 0
-        @_queues = {}
-        @_exchanges = {}
-        @_subscribed_queues = {}
+    constructor: (@url, options) ->
+        assert _.isString(@url), "missing url"
+        @options = _.extend({}, DEFAULT_OPTIONS, options)
+        @_reset_connection()
 
     publish: (event, payload, options, cb) ->
-        """
+        ###
+        TODO: need to fix it after switch to new aqmplib
+
         publish to event on the specified channel and topic
 
         "<channel>:<topic>" = event
-        """
+        ###
         assert(event, "event required")
         assert(payload, "payload required")
 
@@ -90,14 +81,18 @@ class Vent extends EventEmitter
         @
 
     subscribe: (event, options, listener) ->
-        """
+        ###
         subscribe to events on the specified channel and topic
 
         "<channel>:<topic>" = event
         {group, durable} = options
         or
         "<group_name>" = options
-        """
+
+        you can subscripe with 'ack' option. In that case listener will be
+        called with callback functions as second argument. You are supposed
+        to call that callback when processing is done
+        ###
         unless listener
             listener = options
             options = {}
@@ -109,33 +104,15 @@ class Vent extends EventEmitter
         assert _.isFunction(listener), "listener required"
 
         event_options = @_parse_event(event)
+        options = _.extend({}, @options, event_options, options)
+        options.auto_delete = false if options.group?
+        options.group ?= uuid.v4()
 
-        # Combine options ordered by scope
-        sub_options = _.extend({}, @options, event_options, options)
-        sub_options.auto_delete = false if sub_options.group?
-        sub_options.group ?= uuid.v4()
-
-        logger.trace("subscribe to topic", {options})
-        @_when_queue(sub_options)
-            .then (queue) =>
-                queue.subscribe(listener)
-                    .addCallback((ok) =>
-                        ctag = ok.consumerTag
-                        @_remember_subscription(event, listener, {queue, ctag})
-                    )
-                @emit('bound', {queue})
-
-            .fail (err) ->
-                logger.error({err}, "subscribing") if err
-                @emit('error', err)
+        @_create_subscription(options, listener)
         @
 
-    _remember_subscription: (event, listener, options) ->
-        unless @_subscribed_queues[event]
-            @_subscribed_queues[event] = []
-        @_subscribed_queues[event].push([listener, options])
-
     unsubscribe: (event, listener) ->
+        ## TODO: need brand new implementation
         return unless @_subscribed_queues[event]
 
         unsubscribe = (options) =>
@@ -151,14 +128,16 @@ class Vent extends EventEmitter
         @
 
     subscribe_stream: (event, options, cb) ->
-        """
+        ###
+        TODO: need to fix it after switch to new aqmplib
+
         subscribe to a stream of events on the specified channel and topic
 
         "<channel>:<topic>" = event
         {group, durable} = options
         or
         "<group_name>" = options
-        """
+        ###
         unless listener
             listener = override_options
             override_options = {}
@@ -184,8 +163,88 @@ class Vent extends EventEmitter
             .fail (err) ->
                 logger.error({err}, "subscribing to stream") if err
                 @emit('error', err)
-
         @
+
+    #
+    # Connection and channel handling
+    # -------------------------------
+    #
+    # In case of connection error, order of events is as follows:
+    #  * conenction error
+    #  * channel closed
+    #  * connection closed
+    #
+    # On connection error we will reset connection. When it comes to conneciton
+    # closed handler, we can figgure out if vent is closed depending whether any
+    # subscription was reconneted. Potential subscription reconnect logic will
+    # kick in on channel closed event.
+    
+    _open_connection: =>
+        ###
+        Open new connection
+
+        It is subject to _.memoize, so it will be called only once per connection
+        ###
+        conn_options = _.pick(@options, 'hearbeat')
+        logger.debug("creating queue connection", {url, conn_options})
+        amqp.connect(@url, con_options).then (conn) =>
+            logger.debug('amqp connection created', {conn})
+            conn.on 'error', (err) ->
+                    logger.error("Connection error", {err, url})
+                    @emit('error', err)
+                    @_reset_connection()
+                .on 'close', ->
+                    logger.info('Connection closed', {url})
+                    if not @_connect.has()
+                        @emit('close')
+                .on 'blocked', ->
+                    logger.warn('Connection blocked', {url})
+                .on 'unblocked', ->
+                    logger.info('Connection unblocked', {url})
+
+    _reset_connection: ->
+        logger.debug('connection reset')
+        @_connect = _.memoize(@_open_connection)
+        @_subscriptions = []
+
+    _create_channel: ->
+        @_connect().then (conn) ->
+            conn.createChannel()
+
+    _create_subscription: (options, listener) ->
+        @_create_channel().then (ch) =>
+            queue_name = @_generate_queue_name(options)
+            queue_options = @_generate_queue_options(options)
+            exch_name = queue_binding_source = options.channel
+            exch_options = @_generate_exchange_options(options)
+            topic = options.topic
+            consumer = @_wrap_consumer_callback(listener)
+            if options.ack
+                consumer = @_wrap_ack_callback(listener, channel)
+
+            logger.debug('setting up queue', {queue_name, queue_options, exch_name, topic})
+            steps = [
+                ch.assertQueue(queue_name, queue_options)
+                ch.assertExchange(exch_name, exch_options)
+            ]
+
+            if options.partition?
+                partition_exch_name = "#{exch_name}.#{options.group}-splitter"
+                partition_exch_options =
+                    type: 'x-consistent-hash'
+                    autoDelete: if options.autoDelete? then options.autoDelete else true
+                steps.concat([
+                    ch.assertExchange(partition_exch_name)
+                    ch.bindExchange(partition_exch_name, exch_options, topic)
+                ])
+                topic = '10' # for x-consistent hash echange topic is a weight
+
+            steps.concat([
+                ch.bindQueue(queue_name, queue_binding_source, topic)
+                ch.consume(queue_name, listener)
+            ])
+            w.all(steps)
+
 
     _parse_event: (event) ->
         assert _.isString(event), "event string required"
@@ -205,13 +264,6 @@ class Vent extends EventEmitter
         assert(result.topic, "topic required")
         result
 
-    _when_queue: (options) ->
-        queue_name = @_generate_queue_name(options)
-        unless queue_name of @_queues
-            @_queues[queue_name] = @_create_queue(options)
-
-        @_queues[queue_name]
-
     _generate_queue_name: (options) ->
         assert _.isString(options.channel), "channel required"
         assert _.isString(options.topic),   "topic required"
@@ -225,22 +277,14 @@ class Vent extends EventEmitter
             name += ":p#{partition_key}"
         name
 
-    _create_queue: (options) ->
-        logger.trace("create queue", {options})
-        @_when_connection()
-            .then @_create_queue_instance.bind(@, options)
-            .then @_create_exchange_bind.bind(@, options)
-
-    _create_queue_instance: (options, connection) ->
+    _generate_queue_options: (options) ->
         assert _.isBoolean(options.durable), "boolean durable option required"
-        assert _.isObject(connection), "connection required"
 
         queue_name = @_generate_queue_name(options)
 
         args = options.args or {}
         if options.ttl?
             args['x-message-ttl'] = options.ttl
-
 
         auto_delete = not options.durable
         if options.auto_delete?
@@ -249,122 +293,42 @@ class Vent extends EventEmitter
         queue_opts =
             autoDelete: auto_delete
             durable: options.durable
-            'arguments': args
+            arguments: args
 
-        queue_deferred = Q.defer()
-        logger.trace("create queue instance", {queue_name, queue_opts})
-        connection.queue queue_name, queue_opts, (queue) =>
-            queue_deferred.resolve(queue)
-
-        queue_deferred.promise
-
-    _create_exchange_bind: (options, queue) ->
-        @_when_exchange(options)
-            .then @_bind_queue.bind(@, queue, options)
-
-    _bind_queue: (queue, options, exchange) ->
-        assert _.isObject(queue), "queue required"
-        assert _.isObject(exchange), "exchange required"
-        assert _.isString(options.topic), "topic option require"
-
-        binding_key = if options.partition then "10" else options.topic
-        bound_queue_deferred = Q.defer()
-
-        logger.trace("binding queue to exchange", {queue: queue.name, exchange: exchange.name, binding_key})
-        queue.bind(exchange, binding_key)
-        queue.on 'queueBindOk', ->
-            logger.trace("queue and exchange bound", {binding_key})
-            bound_queue_deferred.resolve(queue)
-
-        bound_queue_deferred.promise
-
-    _when_connection: ->
-        @connection ?= @_create_connection()
-        @connection
-
-    _create_connection: ->
-        conn_deferred = Q.defer()
-        settings = {url: @setup.server}
-        @conn_count++
-        logger.debug("creating queue connection", {settings, @conn_count})
-        conn = amqp.createConnection(settings,
-                                    @amqp_options,
-                                    conn_deferred.resolve)
-        conn.on 'error', (err) ->
-            logger.error({err}, "amqp connection error")
-            conn_deferred.reject(err)
-
-        conn.on 'ready', ->
-            logger.info 'amqp connection ready'
-
-        conn.on  'heartbeat', ->
-            logger.debug 'amqp connection heartbeat'
-
-        conn.on 'close', ->
-            logger.info 'amqp connection closed'
-
-        conn_deferred.promise
-
-    _when_exchange: (options) ->
-        assert _.isString(options.channel), "channel required"
-
-        unless options.channel of @_exchanges
-            @_exchanges[options.channel] = @_create_exchange(options)
-
-        @_exchanges[options.channel]
-
-    _create_exchange: (options) ->
-        @_when_connection()
-            .then @_create_exchange_instance.bind(@, options)
-
-    _create_exchange_instance: (options, connection) ->
-        assert _.isString(options.channel), "boolean channel option required"
-
-        logger.trace("create exchange: %s", options.exchange)
-
-        exch_deferred = Q.defer()
-        promise = exch_deferred.promise
-        exch_name = options.channel
+    _generate_exchange_options: (options) ->
         exch_options =
             type: options.type or 'topic'
             autoDelete: false
             durable: options.durable
 
-        if options.partition?
-            exch_name = "#{exch_name}.#{options.group}-splitter"
-            _.extend(exch_options,
-                type: 'x-consistent-hash'
-                autoDelete: true
-            )
-            exchange = null
-            promise = promise.then @_create_bound_exchange.bind(@, options, connection)
+    _wrap_consumer_callback: (fn) ->
+        """ Wrapper for unpacking message content """
+        (msg) -> fn(msg.content)
 
-        logger.trace("create exchange instance", {exch_name, exch_options})
-        connection.exchange(exch_name, exch_options, exch_deferred.resolve)
-        promise
-
-    _create_bound_exchange: (options, connection, exchange) ->
-        @_create_exchange_instance(_.omit(options, 'partition'), connection)
-            .then @_bind_exchange.bind(@, exchange, options)
-
-    _bind_exchange: (exchange, options, source) ->
-        assert _.isString(options.topic), "topic option require"
-
-        binding_key = options.topic
-        exchange_deferred = Q.defer()
-
-        logger.trace("binding exchange to other exchange", {exchange: exchange.name, source: source.name, binding_key})
-        exchange.bind(source, binding_key, ->
-            exchange_deferred.resolve(exchange)
+    _wrap_ack_callback: (fn, channel) ->
+        """ Wrapper that adds ack callback to argumetns"""
+        (msg) -> fn(msg, (err) ->
+            if err?
+                # TODO: Right now there is not much we can do about errors beside
+                # jsut dropping mesage one a floor and logging message. In feature
+                # version we should have support for configurable errors queue,
+                # where errors coudl be forwarded for operator intervention.
+                # We defenitelly don't want to re-put into queue, because if it is
+                # problem with message itself, we can end up in indefenite loop
+                logger.error('Error in message consumer', {err})
+            channel.ack(msg)
         )
-        exchange_deferred.promise
+
+    
 
 
 module.exports = (setup, options) ->
-    setup = {server: setup} if _.isString(setup)
+    setup = {url: setup} if _.isString(setup)
     new Vent(setup, options)
 
+
 class QueueStream extends Readable
+    # TODO: would be nice to take advantage of ack calback support in subscription
 
     constructor: (@queue, options)->
         highWaterMark = options.high_watermark or 16
@@ -382,3 +346,7 @@ class QueueStream extends Readable
 
     _read: ->
         @queue.shift()
+
+
+# TOOD: new librabry channel supports drain events and flow controll of
+# publish method. Would be nice to have writable publisher stream supporting that

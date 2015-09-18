@@ -2,22 +2,24 @@
   "author": "Colin Hemmings <colin.hemmings@dataloop.io> (www.dataloop.io)",
   "name": "amqp-vent",
   "description": "PubSub message bus over rabbitmq",
-  "version": "0.1.24",
+  "version": "0.2.0",
   "repository": {
     "url": "https://github.com/dataloop/vent"
   },
   "main": "./index.js",
-  "scripts": {},
-  "dependencies": {
-    "amqp": "~0.2.0",
-    "amqp-stream": "^0.1.0",
-    "debug": "~1.0.3",
-    "dl-logger": "^0.1.3",
-    "lodash": "^2.4.1",
-    "node-uuid": "~1.4.1",
-    "q": "~1.0.1"
+  "scripts": {
+    "prepublish": "coffee -o lib/ -c src/"
   },
-  "devDependencies": {},
+  "dependencies": {
+    "amqplib": "^0.4.0",
+    "dl-logger": "^0.1.3",
+    "lodash": "^3.10.1",
+    "node-uuid": "~1.4.1",
+    "when": "^3.6.4"
+  },
+  "devDependencies": {
+    "coffee-script": "^1.10.0"
+  },
   "optionalDependencies": {},
   "engines": {
     "node": "~0.10.24"
