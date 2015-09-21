@@ -244,7 +244,7 @@ class Vent extends EventEmitter
                 ch.consume(queue_name, listener)
             ])
             w.all(steps)
-
+            # TODO: add channle bindings to restart whole subscription if any of it fails
 
     _parse_event: (event) ->
         assert _.isString(event), "event string required"
@@ -318,8 +318,6 @@ class Vent extends EventEmitter
                 logger.error('Error in message consumer', {err})
             channel.ack(msg)
         )
-
-    
 
 
 module.exports = (setup, options) ->
