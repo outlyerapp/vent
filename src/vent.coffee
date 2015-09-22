@@ -1,7 +1,6 @@
 os              = require 'os'
 assert          = require 'assert'
 {EventEmitter}  = require 'events'
-{Readable}      = require 'stream'
 _               = require 'lodash'
 amqp            = require 'amqplib'
 logger          = require('dl-logger')("dl:vent")
@@ -108,10 +107,10 @@ class Vent extends EventEmitter
         options.auto_delete = false if options.group?
         options.group ?= uuid.v4()
 
-        @_create_subscription(options, listener)
+        @_create_subscription_channel(options, listener)
         @
 
-    unsubscribe: (event, listener) ->
+    unsubscribe: (event, options, listener) ->
         ## TODO: need brand new implementation
         return unless @_subscribed_queues[event]
 
@@ -129,40 +128,24 @@ class Vent extends EventEmitter
 
     subscribe_stream: (event, options, cb) ->
         ###
-        TODO: need to fix it after switch to new aqmplib
+        Createa stream wubscribed to all of events on the specified channel and topic
 
-        subscribe to a stream of events on the specified channel and topic
+        Options are the same as for @subscribe method, plus optional high_watermark
+        option for created stream.
 
-        "<channel>:<topic>" = event
-        {group, durable} = options
-        or
-        "<group_name>" = options
+        Stream subscriptions are always using acknowledgments to manage flow.
         ###
-        unless listener
-            listener = override_options
-            override_options = {}
+        unless cb
+            cb = options
+            options = {}
 
         if _.isString(options)
             options = {group: options}
 
-        assert _.isString(event), "event required"
-        assert _.isFunction(cb), "completion required"
+        stream = new vent_stream.ConsumerStream(_.pick(options, high_watermark)
 
-        event_options = @_parse_event(event)
-
-        # Combine options ordered by scope
-        sub_options = _.extend({}, @options, event_options, options)
-        sub_options.group ?= uuid.v4()
-
-        logger.trace("subscribe to topic stream", {options})
-        @_when_queue(sub_options)
-            .then (queue) =>
-                cb(null, new QueueStream(queue, options))
-                @emit('bound', {queue})
-
-            .fail (err) ->
-                logger.error({err}, "subscribing to stream") if err
-                @emit('error', err)
+        @subscribe(event, _.extend({}, options, ack: true), stream.push_message)
+        @cb(null, stream)
         @
 
     #
@@ -211,7 +194,7 @@ class Vent extends EventEmitter
         @_connect().then (conn) ->
             conn.createChannel()
 
-    _create_subscription: (options, listener) ->
+    _create_subscription_channel: (options, listener) ->
         @_create_channel().then (ch) =>
             queue_name = @_generate_queue_name(options)
             queue_options = @_generate_queue_options(options)
@@ -244,7 +227,7 @@ class Vent extends EventEmitter
                 ch.consume(queue_name, listener)
             ])
             w.all(steps)
-            # TODO: add channle bindings to restart whole subscription if any of it fails
+            # TODO: add channel bindings to restart whole subscription if channel is closed
 
     _parse_event: (event) ->
         assert _.isString(event), "event string required"
@@ -323,28 +306,3 @@ class Vent extends EventEmitter
 module.exports = (setup, options) ->
     setup = {url: setup} if _.isString(setup)
     new Vent(setup, options)
-
-
-class QueueStream extends Readable
-    # TODO: would be nice to take advantage of ack calback support in subscription
-
-    constructor: (@queue, options)->
-        highWaterMark = options.high_watermark or 16
-        super({objectMode: true, highWaterMark})
-
-        # enable ack so the stream can request messages when its ready
-        sub_options =
-            ack: true
-            prefetchCount: options.prefetch or 1
-
-        @queue.subscribe(sub_options, @_on_message.bind(@))
-
-    _on_message: (msg) =>
-        @push(msg)
-
-    _read: ->
-        @queue.shift()
-
-
-# TOOD: new librabry channel supports drain events and flow controll of
-# publish method. Would be nice to have writable publisher stream supporting that
