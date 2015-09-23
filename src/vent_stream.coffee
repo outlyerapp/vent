@@ -1,24 +1,28 @@
 stream = require 'stream'
+when_ = require 'when'
 
 
 class ConsumerStream extends stream.Readable
 
     constructor: (options)->
-        @_ack = null
+        @_paused_resolvers_queue = []
         highWaterMark = options.high_watermark or 16
         super({objectMode: true, highWaterMark})
 
-    push_message: (msg, cb) =>
-        """ This is protected method to us by vent. You should not use it by client """
-        if @push(msg)
-            cb()
-        else
-            @_ack = cb
+    push_message: (msg) =>
+        ### This is protected method to use by vent. You should not use it by client ###
 
-    _read: ->
-        if @_ack?
-            @_ack()
-            @_ack = null
+        # TODO: we need to test stream flow control
+        unless @push(msg)
+            when_.promise (resolve) =>
+                @_paused_resolvers_queue.push(resolve)
+
+    _read: (size) ->
+        queue = @_paused_resolvers_queue
+        return if queue.length is 0
+        for i in [0..(Math.min(size, queue.length) - 1)]
+            queue[i]()
+        @_paused_resolvers_queue = queue.slice(i)
 
     close: ->
         # TODO: add support for closing stream and removing subscription

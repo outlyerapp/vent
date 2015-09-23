@@ -7,6 +7,7 @@ logger          = require('dl-logger')("dl:vent")
 uuid            = require 'node-uuid'
 when_           = require 'when'
 
+vent_stream     = require './vent_stream'
 
 DEFAULT_OPTIONS =
     channel: 'vent'
@@ -99,7 +100,7 @@ class Vent extends EventEmitter
 
         you can subscripe with 'ack' option. In that case listener can return promise.
         Acknowledgemnt will be sent only one promise is resolved. It will return value
-        ack will be sent imediately. Still usefull to limit rate
+        ack will be sent imediately. Still usefull to limit rate.
         ###
         unless listener
             listener = options
@@ -142,25 +143,29 @@ class Vent extends EventEmitter
 
     subscribe_stream: (event, options, cb) ->
         ###
-        Createa stream wubscribed to all of events on the specified channel and topic
-
-        Options are the same as for @subscribe method, plus optional high_watermark
-        option for created stream.
-
-        Stream subscriptions are always using acknowledgments to manage flow.
+        Deprecated, Backward compatible asynchronous stream creation
         ###
         unless cb
             cb = options
             options = {}
 
+        @cb(null, @tap(event, options))
+        @
+
+    tap: (event, options) ->
+        ###
+        Create tap, a stream subscribed to choosen event types
+
+        It returns readable stream
+        ###
         if _.isString(options)
             options = {group: options}
 
-        stream = new vent_stream.ConsumerStream(_.pick(options, high_watermark))
-
+        stream = new vent_stream.ConsumerStream(_.pick(options, 'high_watermark', 'highWatermark'))
         @subscribe(event, _.extend({}, options, ack: true), stream.push_message)
-        @cb(null, stream)
-        @
+        stream
+
+        
 
     # TODO: add vent close method implementation
 
