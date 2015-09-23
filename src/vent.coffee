@@ -97,9 +97,9 @@ class Vent extends EventEmitter
         or
         "<group_name>" = options
 
-        you can subscripe with 'ack' option. In that case listener will be
-        called with callback functions as second argument. You are supposed
-        to call that callback when processing is done
+        you can subscripe with 'ack' option. In that case listener can return promise.
+        Acknowledgemnt will be sent only one promise is resolved. It will return value
+        ack will be sent imediately. Still usefull to limit rate
         ###
         unless listener
             listener = options
@@ -229,6 +229,7 @@ class Vent extends EventEmitter
             exch_options = @_generate_exchange_options(options)
             topic = options.topic
             consumer = @_wrap_consumer_callback(listener, ch, options)
+            consumer_options = @_generate_consumer_options(options)
 
             logger.debug('setting up queue', {queue_name, queue_options, exch_name, exch_options, topic})
             steps = [
@@ -246,9 +247,12 @@ class Vent extends EventEmitter
                 ])
                 topic = '10' # for x-consistent hash echange topic is a weight
 
+            if options.prefetch?
+                steps.push(ch.prefetch(options.prefetch))
+
             steps.concat([
                 ch.bindQueue(queue_name, queue_binding_source, topic)
-                ch.consume(queue_name, consumer)
+                ch.consume(queue_name, consumer, consumer_options)
             ])
             # TODO: add channel bindings to restart whole subscription if channel is closed
             p = when_.all(steps)
@@ -308,6 +312,9 @@ class Vent extends EventEmitter
         autoDelete: false
         durable: options.durable
 
+    _generate_consumer_options: (options) ->
+        noAck: not options.ack
+
     _decode_message: (msg) =>
         content = msg.content
         content_type = msg.content_type
@@ -333,7 +340,7 @@ class Vent extends EventEmitter
         wrapped = (msg) ->
             when_.try(-> decode(msg)).then(fn)
         if options.ack
-            wrapped = @_wrap_ack_promise(wrapped, channel)
+            wrapped = @_wrap_ack_callback(wrapped, channel)
         wrapped
 
     _wrap_ack_callback: (fn, channel) ->
@@ -347,7 +354,7 @@ class Vent extends EventEmitter
                     # where errors coudl be forwarded for operator intervention.
                     # We defenitelly don't want to re-put into queue, because if it is
                     # problem with message itself, we can end up in indefenite loop
-                    logger.error('Error in message consumer', {err})
+                    logger.error({err}, 'Error in message consumer')
                 .finally ->
                     channel.ack(msg)
 
