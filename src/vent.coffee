@@ -5,7 +5,7 @@ _               = require 'lodash'
 amqp            = require 'amqplib'
 logger          = require('dl-logger')("dl:vent")
 uuid            = require 'node-uuid'
-w               = require 'when'
+when_           = require 'when'
 
 
 DEFAULT_OPTIONS =
@@ -20,6 +20,7 @@ class Vent extends EventEmitter
     Jobs a general purpose Pub/Sub event lib hased on AMQP
 
     You can subscribe or publish event based on the following concepts
+
     ## Channels
     A channel is used to group common types of event. This maps to a EXCHANGE
     on both publish and subscribe
@@ -38,14 +39,22 @@ class Vent extends EventEmitter
     of the same worker/service. In some cases you will only want one service
     to handle a particular event. This is were groups are useful
 
+    By default, subscription that use groups will not be auto-deleted.
+
     ## options
     durable - is a non-transient setup, meaning that queues and thier content
               will be persisted through restarts
     group   - SEE ABOVE
+
+    ## TODO: Handling errors
+
+    We are planning to add support for metric processing errors. You will be able
+    to provide error channel, that will be used to publish all messages that caused
+    processing error together with error explanation.
     ###
 
-    constructor: (@url, options) ->
-        assert _.isString(@url), "missing url"
+    constructor: ({@url}, options) ->
+        assert _.isString(@url), "missing vent url"
         @options = _.extend({}, DEFAULT_OPTIONS, options)
         @_reset_connection()
 
@@ -108,6 +117,11 @@ class Vent extends EventEmitter
         options.group ?= uuid.v4()
 
         @_create_subscription_channel(options, listener)
+            .then(() ->
+                logger.info('Subscription created', {options})
+            , (err) ->
+                logger.error({err}, 'Error when opening new subscription', {options})
+            )
         @
 
     unsubscribe: (event, options, listener) ->
@@ -142,11 +156,13 @@ class Vent extends EventEmitter
         if _.isString(options)
             options = {group: options}
 
-        stream = new vent_stream.ConsumerStream(_.pick(options, high_watermark)
+        stream = new vent_stream.ConsumerStream(_.pick(options, high_watermark))
 
         @subscribe(event, _.extend({}, options, ack: true), stream.push_message)
         @cb(null, stream)
         @
+
+    # TODO: add vent close method implementation
 
     #
     # Connection and channel handling
@@ -161,21 +177,22 @@ class Vent extends EventEmitter
     # closed handler, we can figgure out if vent is closed depending whether any
     # subscription was reconneted. Potential subscription reconnect logic will
     # kick in on channel closed event.
-    
+
     _open_connection: =>
         ###
         Open new connection
 
         It is subject to _.memoize, so it will be called only once per connection
         ###
-        conn_options = _.pick(@options, 'hearbeat')
-        logger.debug("creating queue connection", {url, conn_options})
-        amqp.connect(@url, con_options).then (conn) =>
+        url = @_get_connection_url()
+        logger.debug("Opening new vent connection", {url, @options})
+        amqp.connect(url).then (conn) =>
             logger.debug('amqp connection created', {conn})
             conn.on 'error', (err) ->
                     logger.error("Connection error", {err, url})
                     @emit('error', err)
-                    @_reset_connection()
+                    process.exit(1)
+                    #@_reset_connection()
                 .on 'close', ->
                     logger.info('Connection closed', {url})
                     if not @_connect.has()
@@ -184,10 +201,20 @@ class Vent extends EventEmitter
                     logger.warn('Connection blocked', {url})
                 .on 'unblocked', ->
                     logger.info('Connection unblocked', {url})
+            conn
+
+    _get_connection_url: =>
+        url = @url
+        heartbeat = @options.heartbeat
+        if heartbeat?
+            separator = if url.indexOf('?') >= 0 then '&' else '?'
+            url += "#{separator}heartbeat=#{heartbeat}"
+        url
 
     _reset_connection: ->
         logger.debug('connection reset')
-        @_connect = _.memoize(@_open_connection)
+        #@_connect = _.memoize(@_open_connection)
+        @_connect = @_open_connection
         @_subscriptions = []
 
     _create_channel: ->
@@ -201,33 +228,32 @@ class Vent extends EventEmitter
             exch_name = queue_binding_source = options.channel
             exch_options = @_generate_exchange_options(options)
             topic = options.topic
-            consumer = @_wrap_consumer_callback(listener)
-            if options.ack
-                consumer = @_wrap_ack_callback(listener, channel)
+            consumer = @_wrap_consumer_callback(listener, ch, options)
 
-            logger.debug('setting up queue', {queue_name, queue_options, exch_name, topic})
+            logger.debug('setting up queue', {queue_name, queue_options, exch_name, exch_options, topic})
             steps = [
                 ch.assertQueue(queue_name, queue_options)
-                ch.assertExchange(exch_name, exch_options)
+                ch.assertExchange(exch_name, 'topic', exch_options)
             ]
 
             if options.partition?
                 partition_exch_name = "#{exch_name}.#{options.group}-splitter"
                 partition_exch_options =
-                    type: 'x-consistent-hash'
                     autoDelete: if options.autoDelete? then options.autoDelete else true
                 steps.concat([
-                    ch.assertExchange(partition_exch_name)
+                    ch.assertExchange(partition_exch_name, 'x-consistent-hash')
                     ch.bindExchange(partition_exch_name, exch_options, topic)
                 ])
                 topic = '10' # for x-consistent hash echange topic is a weight
 
             steps.concat([
                 ch.bindQueue(queue_name, queue_binding_source, topic)
-                ch.consume(queue_name, listener)
+                ch.consume(queue_name, consumer)
             ])
-            w.all(steps)
             # TODO: add channel bindings to restart whole subscription if channel is closed
+            p = when_.all(steps)
+            logger.debug('Preapred promise: ', {p})
+            p
 
     _parse_event: (event) ->
         assert _.isString(event), "event string required"
@@ -279,30 +305,54 @@ class Vent extends EventEmitter
             arguments: args
 
     _generate_exchange_options: (options) ->
-        exch_options =
-            type: options.type or 'topic'
-            autoDelete: false
-            durable: options.durable
+        autoDelete: false
+        durable: options.durable
 
-    _wrap_consumer_callback: (fn) ->
+    _decode_message: (msg) =>
+        content = msg.content
+        content_type = msg.content_type
+        switch content_type
+            when 'application/json'
+                try
+                    content = JSON.parse(content)
+                catch err
+                    logger.warn('Error parsing json message', {err, msg})
+                    throw err
+            when 'text/plain'
+                content = content.toString('utf8')
+            when undefined
+                content = content.toString('utf8')
+            else
+                loger.warn('Recived message with unknown content_type', {content_type, msg})
+                throw new Error("Do not know how to hange message type: " + content_type)
+        content
+
+    _wrap_consumer_callback: (fn, channel, options) ->
         """ Wrapper for unpacking message content """
-        (msg) -> fn(msg.content)
+        decode = @_decode_message
+        wrapped = (msg) ->
+            when_.try(-> decode(msg)).then(fn)
+        if options.ack
+            wrapped = @_wrap_ack_promise(wrapped, channel)
+        wrapped
 
     _wrap_ack_callback: (fn, channel) ->
         """ Wrapper that adds ack callback to argumetns"""
-        (msg) -> fn(msg, (err) ->
-            if err?
-                # TODO: Right now there is not much we can do about errors beside
-                # jsut dropping mesage one a floor and logging message. In feature
-                # version we should have support for configurable errors queue,
-                # where errors coudl be forwarded for operator intervention.
-                # We defenitelly don't want to re-put into queue, because if it is
-                # problem with message itself, we can end up in indefenite loop
-                logger.error('Error in message consumer', {err})
-            channel.ack(msg)
-        )
+        (msg) ->
+            when_(fn(msg))
+                .catch (err) ->
+                    # TODO: Right now there is not much we can do about errors beside
+                    # jsut dropping mesage one a floor and logging message. In feature
+                    # version we should have support for configurable errors queue,
+                    # where errors coudl be forwarded for operator intervention.
+                    # We defenitelly don't want to re-put into queue, because if it is
+                    # problem with message itself, we can end up in indefenite loop
+                    logger.error('Error in message consumer', {err})
+                .finally ->
+                    channel.ack(msg)
 
 
 module.exports = (setup, options) ->
     setup = {url: setup} if _.isString(setup)
+    logger.debug('setup', {setup})
     new Vent(setup, options)
