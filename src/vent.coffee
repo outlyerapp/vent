@@ -75,18 +75,24 @@ class Vent extends EventEmitter
             options = {}
 
         event_options = @_parse_event(event)
-        pub_options = _.extend({}, @options, event_options, options)
+        options = _.extend({}, @options, event_options, options)
 
-        _cb = (errors) ->
-            return unless cb
-            if errors then cb(new Error('message publish fail')) else cb()
-
-        logger.trace("publish message", {@options, pub_options, payload})
-        @_when_exchange(pub_options)
-            .then (exchange) ->
-                exchange.publish(pub_options.topic, payload, {}, _cb)
-
-            .fail cb
+        @_get_publishing_channel()
+            .then(@_assert_exchange.bind(@, options))
+            .done((channel) =>
+                {content, properties} = @_encode_message(payload)
+                message_options = _.chain(options)
+                    .pick('mandatory', 'persistent', 'deliveryMode', 'expiration', 'CC')
+                    .extend(properties)
+                    .value()
+                if not channel.publish(options.channel, options.topic, content, message_options) and cb?
+                    logger.debug('Overloaded')
+                    return channel.once('drain', cb)
+                cb?()
+            , (err) ->
+                logger.error({err}, 'Error when trying to open publishing channel')
+                cb(err) if cb?
+            )
         @
 
     subscribe: (event, options, listener) ->
@@ -118,7 +124,7 @@ class Vent extends EventEmitter
         options.group ?= uuid.v4()
 
         @_create_subscription_channel(options, listener)
-            .then(() ->
+            .done(() ->
                 logger.info('Subscription created', {options})
             , (err) ->
                 logger.error({err}, 'Error when opening new subscription', {options})
@@ -165,9 +171,9 @@ class Vent extends EventEmitter
         @subscribe(event, _.extend({}, options, ack: true), stream.push_message)
         stream
 
-        
-
-    # TODO: add vent close method implementation
+    close: =>
+        # TODO: add vent close method implementation
+        logger.warn('Closing vent is not implemented yet!')
 
     #
     # Connection and channel handling
@@ -190,14 +196,13 @@ class Vent extends EventEmitter
         It is subject to _.memoize, so it will be called only once per connection
         ###
         url = @_get_connection_url()
-        logger.debug("Opening new vent connection", {url, @options})
         amqp.connect(url).then (conn) =>
-            logger.debug('amqp connection created', {conn})
+            logger.debug('Created new amqp connection', {conn})
             conn.on 'error', (err) ->
-                    logger.error("Connection error", {err, url})
+                    logger.error({err}, "Connection error", {url})
                     @emit('error', err)
                     process.exit(1)
-                    #@_reset_connection()
+                    @_reset_connection()
                 .on 'close', ->
                     logger.info('Connection closed', {url})
                     if not @_connect.has()
@@ -218,28 +223,39 @@ class Vent extends EventEmitter
 
     _reset_connection: ->
         logger.debug('connection reset')
-        #@_connect = _.memoize(@_open_connection)
-        @_connect = @_open_connection
+        @_connect = _.memoize(@_open_connection)
         @_subscriptions = []
+        @_pub_channels = null
+        @_confirmed_exchanges = {}
 
     _create_channel: ->
         @_connect().then (conn) ->
             conn.createChannel()
+
+    _create_publishing_channels: ->
+        @_create_channel().then (channel) =>
+            @_publishing_channels = [channel]
+
+    _get_publishing_channel: ->
+        when_(@_publishing_channels or @_create_publishing_channels()).then (chs) ->
+            idx = 0
+            if chs.length > 1
+                idx = Math.floor(Math.random() * chs.length)
+            return chs[idx]
 
     _create_subscription_channel: (options, listener) ->
         @_create_channel().then (ch) =>
             queue_name = @_generate_queue_name(options)
             queue_options = @_generate_queue_options(options)
             exch_name = queue_binding_source = options.channel
-            exch_options = @_generate_exchange_options(options)
             topic = options.topic
             consumer = @_wrap_consumer_callback(listener, ch, options)
             consumer_options = @_generate_consumer_options(options)
 
-            logger.debug('setting up queue', {queue_name, queue_options, exch_name, exch_options, topic})
+            logger.debug('setting up queue', {queue_name, queue_options, exch_name, topic})
             steps = [
                 ch.assertQueue(queue_name, queue_options)
-                ch.assertExchange(exch_name, 'topic', exch_options)
+                @_assert_exchange(options, ch)
             ]
 
             if options.partition?
@@ -247,7 +263,7 @@ class Vent extends EventEmitter
                 partition_exch_options =
                     autoDelete: if options.autoDelete? then options.autoDelete else true
                 steps.concat([
-                    ch.assertExchange(partition_exch_name, 'x-consistent-hash')
+                    ch.assertExchange(partition_exch_name, 'x-consistent-hash', partition_exch_options)
                     ch.bindExchange(partition_exch_name, exch_options, topic)
                 ])
                 topic = '10' # for x-consistent hash echange topic is a weight
@@ -263,6 +279,9 @@ class Vent extends EventEmitter
             p = when_.all(steps)
             logger.debug('Preapred promise: ', {p})
             p
+
+    # Different actions options parsing
+    # ---------------------------------
 
     _parse_event: (event) ->
         assert _.isString(event), "event string required"
@@ -320,9 +339,38 @@ class Vent extends EventEmitter
     _generate_consumer_options: (options) ->
         noAck: not options.ack
 
+    # Channel utilities
+    # -----------------
+
+    _assert_exchange: (options, channel) ->
+        exch_name = options.channel
+        exch_options = @_generate_exchange_options(options)
+        if @_confirmed_exchanges[exch_name]
+            return when_(channel)
+
+        channel.assertExchange(exch_name, 'topic', exch_options).then =>
+            @_confirmed_exchanges[exch_name] = 1
+            channel
+
+    # Message encoding
+    # ----------------
+
+    _encode_message: (payload) ->
+        content = null
+        if typeof payload is 'string'
+            content = payload
+            content_type = 'text/plain'
+        else
+            content = JSON.stringify(payload)
+            content_type = 'application/json'
+        content = new Buffer(content)
+        {content, properties:
+            contentType: content_type
+        }
+
     _decode_message: (msg) =>
         content = msg.content
-        content_type = msg.content_type
+        content_type = msg.properties.contentType
         switch content_type
             when 'application/json'
                 try
@@ -338,6 +386,9 @@ class Vent extends EventEmitter
                 loger.warn('Recived message with unknown content_type', {content_type, msg})
                 throw new Error("Do not know how to hange message type: " + content_type)
         content
+
+    # Message callbacks
+    # -----------------
 
     _wrap_consumer_callback: (fn, channel, options) ->
         """ Wrapper for unpacking message content """
