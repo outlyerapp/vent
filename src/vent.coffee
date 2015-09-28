@@ -155,7 +155,7 @@ class Vent extends EventEmitter
             cb = options
             options = {}
 
-        @cb(null, @tap(event, options))
+        cb(null, @tap(event, options))
         @
 
     tap: (event, options) ->
