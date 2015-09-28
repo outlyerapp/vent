@@ -26,6 +26,7 @@ class ConsumerStream extends stream.Readable
 
     close: ->
         # TODO: add support for closing stream and removing subscription
+        @push(null)
 
 
 # TOOD: new librabry channel supports drain events and flow controll of

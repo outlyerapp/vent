@@ -119,16 +119,27 @@ class Vent extends EventEmitter
         assert _.isFunction(listener), "listener required"
 
         event_options = @_parse_event(event)
+        subscriptions = @_subscriptions
         options = _.extend({}, @options, event_options, options)
         options.auto_delete = false if options.group?
         options.group ?= uuid.v4()
+        prepare_channel = null
 
-        @_create_subscription_channel(options, listener)
-            .done(() ->
-                logger.info('Subscription created', {options})
-            , (err) ->
+        for [exch_name, handler, ch] in subscriptions
+            if exch_name is options.channel and handler is listener
+                prepare_channel = ch
+                break
+
+        unless prepare_channel
+            prepare_channel = @_create_subscription_channel(options, listener)
+            subscriptions.push([options.channel, listener, prepare_channel])
+
+        prepare_channel
+            .then (ch) =>
+                @_subscribe_queue(ch, options)
+                logger.info('Started subscription', {options})
+            .catch (err) ->
                 logger.error({err}, 'Error when opening new subscription', {options})
-            )
         @
 
     unsubscribe: (event, options, listener) ->
@@ -167,7 +178,9 @@ class Vent extends EventEmitter
         if _.isString(options)
             options = {group: options}
 
-        stream = new vent_stream.ConsumerStream(_.pick(options, 'high_watermark', 'highWatermark'))
+        stream = options.stream
+        unless stream? and _.isFunction(stream.push_message)
+            stream = new vent_stream.ConsumerStream(_.pick(options, 'high_watermark', 'highWatermark'))
         @subscribe(event, _.extend({}, options, ack: true), stream.push_message)
         stream
 
@@ -243,42 +256,50 @@ class Vent extends EventEmitter
                 idx = Math.floor(Math.random() * chs.length)
             return chs[idx]
 
-    _create_subscription_channel: (options, listener) ->
+    _create_subscription_channel: (options, listener) =>
         @_create_channel().then (ch) =>
             queue_name = @_generate_queue_name(options)
             queue_options = @_generate_queue_options(options)
-            exch_name = queue_binding_source = options.channel
-            topic = options.topic
             consumer = @_wrap_consumer_callback(listener, ch, options)
             consumer_options = @_generate_consumer_options(options)
-
-            logger.debug('setting up queue', {queue_name, queue_options, exch_name, topic})
             steps = [
                 ch.assertQueue(queue_name, queue_options)
                 @_assert_exchange(options, ch)
             ]
 
-            if options.partition?
-                partition_exch_name = "#{exch_name}.#{options.group}-splitter"
-                partition_exch_options =
-                    autoDelete: if options.autoDelete? then options.autoDelete else true
-                steps.concat([
-                    ch.assertExchange(partition_exch_name, 'x-consistent-hash', partition_exch_options)
-                    ch.bindExchange(partition_exch_name, exch_options, topic)
-                ])
-                topic = '10' # for x-consistent hash echange topic is a weight
-
             if options.prefetch?
                 steps.push(ch.prefetch(options.prefetch))
 
-            steps.concat([
-                ch.bindQueue(queue_name, queue_binding_source, topic)
+            steps.push(
                 ch.consume(queue_name, consumer, consumer_options)
-            ])
+            )
+
             # TODO: add channel bindings to restart whole subscription if channel is closed
-            p = when_.all(steps)
-            logger.debug('Preapred promise: ', {p})
-            p
+            when_.all(steps)
+                .then(-> {ch, queue: queue_name})
+
+    _subscribe_queue: ({ch, queue}, options) ->
+        exch_name = queue_binding_source = options.channel
+        queue_binding_source = exch_name
+        topic = options.topic
+        steps = []
+
+        if options.partition?
+            partition_exch_name = "#{exch_name}.#{options.group}-splitter"
+            partition_exch_options =
+                autoDelete: if options.autoDelete? then options.autoDelete else true
+            steps.concat([
+                ch.assertExchange(partition_exch_name, 'x-consistent-hash', partition_exch_options)
+                ch.bindExchange(partition_exch_name, exch_options, topic)
+            ])
+            topic = '10' # for x-consistent hash echange topic is a weight
+            
+        steps.push(
+            ch.bindQueue(queue, queue_binding_source, topic)
+        )
+
+        # TODO: add channel bindings to restart whole subscription if channel is closed
+        when_.all(steps)
 
     # Different actions options parsing
     # ---------------------------------
