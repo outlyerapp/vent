@@ -219,16 +219,11 @@ class Vent extends EventEmitter
                     # keeping reconnect. We can only fail whole process and wait for operator
                     # to fix queues.
                     if err.toString().match(/PRECONDITION-FAILED/)
-                        process.exitCode = 5
-                        process.emit('SIGINT')
-                        conn.close() # Need to close connection explicitly in case if it was with autoreconnect option
-                        return
+                        return emit('error', err)
 
                     # All other errors though should make library keep re-connecting
-                    emit('error', err)
+                    # TODO: implement me
 
-                    # TODO: I need to test if this required, or library is re-binding queues
-                    #@_reset_connection()
                 .on 'close', ->
                     logger.info('Connection closed', {url})
                     unless @_connect? and @_connect.has()
@@ -255,18 +250,22 @@ class Vent extends EventEmitter
 
     _create_channel: ->
         @_connect().then (conn) ->
-            conn.createChannel()
+            conn.createChannel().then (channel) ->
+                channel
+                    .on 'error', (err) ->
+                        logger.error({err}, 'Channel error')
+                    .on 'close', () ->
+                        logger.info('Channel closed', {channel})
 
     _create_publishing_channels: ->
-        @_create_channel().then (channel) =>
-            @_publishing_channels = [channel]
+        @_publishing_channels = [@_create_channel()]
 
     _get_publishing_channel: ->
-        when_(@_publishing_channels or @_create_publishing_channels()).then (chs) ->
-            idx = 0
-            if chs.length > 1
-                idx = Math.floor(Math.random() * chs.length)
-            return chs[idx]
+        available = @_publishing_channels or @_create_publishing_channels()
+        idx = 0
+        if available.length > 1
+            idx = Math.floor(Math.random() * available.length)
+        available[idx]
 
     _create_subscription_channel: (options, listener) =>
         @_create_channel().then (ch) =>
