@@ -25,8 +25,8 @@ class ConsumerStream extends stream.Readable
         @_paused_resolvers_queue = queue.slice(i)
 
     close: ->
-        # TODO: add support for closing stream and removing subscription
         @push(null)
+        @emit('close')
 
 
 # TOOD: new librabry channel supports drain events and flow controll of

@@ -121,7 +121,7 @@ class Vent extends EventEmitter
         event_options = @_parse_event(event)
         subscriptions = @_subscriptions
         options = _.extend({}, @options, event_options, options)
-        options.auto_delete = false if options.group?
+        options.auto_delete = false if not options.auto_delete? and options.group?
         options.group ?= uuid.v4()
         prepare_channel = null
 
@@ -137,24 +137,28 @@ class Vent extends EventEmitter
         prepare_channel
             .then (ch) =>
                 @_subscribe_queue(ch, options)
-                logger.info('Started subscription', {options})
+                logger.debug('Started subscription', {options})
             .catch (err) ->
                 logger.error({err}, 'Error when opening new subscription', {options})
         @
 
     unsubscribe: (event, options, listener) ->
-        ## TODO: need brand new implementation
-        return unless @_subscribed_queues[event]
+        ### Remove subscription
 
-        unsubscribe = (options) =>
-            {queue, ctag} = options
-            queue.unsubscribe(ctag)
+        Right now subscription is matched by channel name and listener only. You can't remove
+        indvidual topics.
+        ###
+        unless listener
+            listener = options
+            options = {}
 
-        @_subscribed_queues[event] = @_subscribed_queues[event].filter (tuple) ->
-            [l, options] = tuple
-            if l is listener
-                unsubscribe(options)
-                return false
+        event_options = @_parse_event(event)
+        options = _.extend({}, @options, event_options, options)
+
+        @_subscriptions = @_subscriptions.filter ([exch_name, handler, when_channel]) ->
+            if exch_name is options.channel and handler is listener
+                when_channel.then ({ch, queue}) -> ch.close()
+                false
             true
         @
 
@@ -182,7 +186,7 @@ class Vent extends EventEmitter
         unless stream? and _.isFunction(stream.push_message)
             stream = new vent_stream.ConsumerStream(_.pick(options, 'high_watermark', 'highWatermark'))
         @subscribe(event, _.extend({}, options, ack: true), stream.push_message)
-        stream
+        stream.on('close', @unsubscribe.bind(@, event, options, stream.push_message))
 
     close: =>
         # TODO: add vent close method implementation
@@ -193,14 +197,10 @@ class Vent extends EventEmitter
     # -------------------------------
     #
     # In case of connection error, order of events is as follows:
-    #  * conenction error
+    #  * connection error
     #  * channel closed
     #  * connection closed
-    #
-    # On connection error we will reset connection. When it comes to conneciton
-    # closed handler, we can figgure out if vent is closed depending whether any
-    # subscription was reconneted. Potential subscription reconnect logic will
-    # kick in on channel closed event.
+    #  * connection re-connects (if reconnect option is set)
 
     _open_connection: =>
         ###
@@ -209,17 +209,30 @@ class Vent extends EventEmitter
         It is subject to _.memoize, so it will be called only once per connection
         ###
         url = @_get_connection_url()
+        emit = @emit.bind(@)
         amqp.connect(url).then (conn) =>
-            logger.debug('Created new amqp connection', {conn})
+            logger.debug('Opened new amqp connection', {conn})
             conn.on 'error', (err) ->
                     logger.error({err}, "Connection error", {url})
-                    @emit('error', err)
-                    process.exit(1)
-                    @_reset_connection()
+
+                    # If it is PRECONDITION_FAILED error, it means that there is no point
+                    # keeping reconnect. We can only fail whole process and wait for operator
+                    # to fix queues.
+                    if err.toString().match(/PRECONDITION-FAILED/)
+                        process.exitCode = 5
+                        process.emit('SIGINT')
+                        conn.close() # Need to close connection explicitly in case if it was with autoreconnect option
+                        return
+
+                    # All other errors though should make library keep re-connecting
+                    emit('error', err)
+
+                    # TODO: I need to test if this required, or library is re-binding queues
+                    #@_reset_connection()
                 .on 'close', ->
                     logger.info('Connection closed', {url})
-                    if not @_connect.has()
-                        @emit('close')
+                    unless @_connect? and @_connect.has()
+                        emit('close')
                 .on 'blocked', ->
                     logger.warn('Connection blocked', {url})
                 .on 'unblocked', ->
@@ -235,7 +248,6 @@ class Vent extends EventEmitter
         url
 
     _reset_connection: ->
-        logger.debug('connection reset')
         @_connect = _.memoize(@_open_connection)
         @_subscriptions = []
         @_pub_channels = null
@@ -300,6 +312,7 @@ class Vent extends EventEmitter
 
         # TODO: add channel bindings to restart whole subscription if channel is closed
         when_.all(steps)
+
 
     # Different actions options parsing
     # ---------------------------------
