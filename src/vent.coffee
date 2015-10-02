@@ -7,6 +7,7 @@ logger          = require('dl-logger')("dl:vent")
 uuid            = require 'node-uuid'
 when_           = require 'when'
 
+VentChannel     = require './vent_channel'
 vent_stream     = require './vent_stream'
 
 DEFAULT_OPTIONS =
@@ -57,12 +58,12 @@ class Vent extends EventEmitter
     constructor: ({@url}, options) ->
         assert _.isString(@url), "missing vent url"
         @options = _.extend({}, DEFAULT_OPTIONS, options)
-        @_reset_connection()
+        @_subscriptions = []
+        @_confirmed_exchanges = {}
+        @_get_publisher = @_create_channel()
 
     publish: (event, payload, options, cb) ->
         ###
-        TODO: need to fix it after switch to new aqmplib
-
         publish to event on the specified channel and topic
 
         "<channel>:<topic>" = event
@@ -76,18 +77,22 @@ class Vent extends EventEmitter
 
         event_options = @_parse_event(event)
         options = _.extend({}, @options, event_options, options)
+        exch_name = options.channel
 
-        @_get_publishing_channel()
-            .then(@_assert_exchange.bind(@, options))
-            .done((channel) =>
+        @_get_publisher
+            .then (ch) =>
+                unless @_confirmed_exchanges[exch_name]
+                    ch.rpc('assertExchange', exch_name, 'topic', @_generate_exchange_options(options))
+                @_confirmed_exchanges[exch_name] = 1
+                ch
+            .then (ch) =>
                 {content, properties} = @_encode_message(payload)
                 message_options = _.chain(options)
                     .pick('mandatory', 'persistent', 'deliveryMode', 'expiration', 'CC')
                     .extend(properties)
                     .value()
-                if not channel.publish(options.channel, options.topic, content, message_options) and cb?
-                    logger.debug('Overloaded')
-                    return channel.once('drain', cb)
+                ch.publish(exch_name, options.topic, content, message_options)
+            .done( ->
                 cb?()
             , (err) ->
                 logger.error({err}, 'Error when trying to open publishing channel')
@@ -107,6 +112,10 @@ class Vent extends EventEmitter
         you can subscripe with 'ack' option. In that case listener can return promise.
         Acknowledgemnt will be sent only one promise is resolved. It will return value
         ack will be sent imediately. Still usefull to limit rate.
+
+        Library will keep a subscription (thus a queue) per channel and listener pair.
+        Subscribing more topics with the same channel and listener will result in multiple
+        bindings per subscription.
         ###
         unless listener
             listener = options
@@ -123,21 +132,19 @@ class Vent extends EventEmitter
         options = _.extend({}, @options, event_options, options)
         options.auto_delete = false if not options.auto_delete? and options.group?
         options.group ?= uuid.v4()
-        prepare_channel = null
+        prepare_subscription = null
 
-        for [exch_name, handler, ch] in subscriptions
+        for [exch_name, handler, sub] in subscriptions
             if exch_name is options.channel and handler is listener
-                prepare_channel = ch
+                prepare_subscription = sub
                 break
 
-        unless prepare_channel
-            prepare_channel = @_create_subscription_channel(options, listener)
-            subscriptions.push([options.channel, listener, prepare_channel])
+        unless prepare_subscription
+            prepare_subscription = @_create_subscription(options, listener)
+            subscriptions.push([options.channel, listener, prepare_subscription])
 
-        prepare_channel
-            .then (ch) =>
-                @_subscribe_queue(ch, options)
-                logger.debug('Started subscription', {options})
+        prepare_subscription
+            .then (sub) => @_bind_subscription(sub, options)
             .catch (err) ->
                 logger.error({err}, 'Error when opening new subscription', {options})
         @
@@ -202,7 +209,7 @@ class Vent extends EventEmitter
     #  * connection closed
     #  * connection re-connects (if reconnect option is set)
 
-    _open_connection: =>
+    _create_connection: ->
         ###
         Open new connection
 
@@ -210,29 +217,30 @@ class Vent extends EventEmitter
         ###
         url = @_get_connection_url()
         emit = @emit.bind(@)
+
+        on_error = (err) ->
+             logger.error({err}, "Connection error", {url})
+
+             # If it is PRECONDITION_FAILED error, it means that there is no point
+             # keeping reconnect. We can only fail whole process and wait for operator
+             # to fix queues.
+             if err.toString().match(/PRECONDITION-FAILED/)
+                 return emit('error', err)
+
+             # All other errors though should make library keep re-connecting
+             # TODO: implement me
+
+        on_close = ->
+            logger.info('Connection closed', {url})
+            # TODO: figgure out what to do now
+
         amqp.connect(url).then (conn) =>
-            logger.debug('Opened new amqp connection', {conn})
-            conn.on 'error', (err) ->
-                    logger.error({err}, "Connection error", {url})
+            logger.debug('Opened new amqp connection', {url})
+            conn.on('error', on_error)
+                .on('close', on_close)
 
-                    # If it is PRECONDITION_FAILED error, it means that there is no point
-                    # keeping reconnect. We can only fail whole process and wait for operator
-                    # to fix queues.
-                    if err.toString().match(/PRECONDITION-FAILED/)
-                        return emit('error', err)
-
-                    # All other errors though should make library keep re-connecting
-                    # TODO: implement me
-
-                .on 'close', ->
-                    logger.info('Connection closed', {url})
-                    unless @_connect? and @_connect.has()
-                        emit('close')
-                .on 'blocked', ->
-                    logger.warn('Connection blocked', {url})
-                .on 'unblocked', ->
-                    logger.info('Connection unblocked', {url})
-            conn
+    _when_connected: =>
+        @_connected ?= @_create_connection()
 
     _get_connection_url: =>
         url = @url
@@ -242,79 +250,61 @@ class Vent extends EventEmitter
             url += "#{separator}heartbeat=#{heartbeat}"
         url
 
-    _reset_connection: ->
-        @_connect = _.memoize(@_open_connection)
-        @_subscriptions = []
-        @_pub_channels = null
-        @_confirmed_exchanges = {}
-
     _create_channel: ->
-        @_connect().then (conn) ->
-            conn.createChannel().then (channel) ->
-                channel
-                    .on 'error', (err) ->
-                        logger.error({err}, 'Channel error')
-                    .on 'close', () ->
-                        logger.info('Channel closed', {channel})
+        options = _.pick(@options, 'reconnect')
+        when_(new VentChannel(@_when_connected, options))
 
-    _create_publishing_channels: ->
-        @_publishing_channels = [@_create_channel()]
+    _create_subscription: (options, listener) =>
+        ### Create new subscription
 
-    _get_publishing_channel: ->
-        available = @_publishing_channels or @_create_publishing_channels()
-        idx = 0
-        if available.length > 1
-            idx = Math.floor(Math.random() * available.length)
-        available[idx]
-
-    _create_subscription_channel: (options, listener) =>
+        Subscription is object having:
+          @ch - initalised channel promise
+          @queue - queue name being subject to all bindings
+        ###
         @_create_channel().then (ch) =>
             queue_name = @_generate_queue_name(options)
             queue_options = @_generate_queue_options(options)
             consumer = @_wrap_consumer_callback(listener, ch, options)
             consumer_options = @_generate_consumer_options(options)
-            steps = [
-                ch.assertQueue(queue_name, queue_options)
-                @_assert_exchange(options, ch)
+            exch_name = options.channel
+            exch_options = @_generate_exchange_options(options)
+
+            cmds = [
+                ['assertQueue', queue_name, queue_options]
+                ['assertExchange', exch_name, 'topic', exch_options]
             ]
 
             if options.prefetch?
-                steps.push(ch.prefetch(options.prefetch))
+                cmds.push(['prefetch', options.prefetch])
 
-            steps.push(
-                ch.consume(queue_name, consumer, consumer_options)
-            )
+            # TODO: maybe we will be better having consumer at channel_stream level
+            cmds.push(['consume', queue_name, consumer, consumer_options])
 
             # TODO: add channel bindings to restart whole subscription if channel is closed
-            when_.all(steps)
-                .then(-> {ch, queue: queue_name})
+            ch.rpc(cmds).then(-> {ch, queue: queue_name})
 
-    _subscribe_queue: ({ch, queue}, options) ->
+    _bind_subscription: ({ch, queue}, options) ->
         exch_name = queue_binding_source = options.channel
         queue_binding_source = exch_name
         topic = options.topic
-        steps = []
+        cmds = []
 
         if options.partition?
             partition_exch_name = "#{exch_name}.#{options.group}-splitter"
             partition_exch_options =
                 autoDelete: if options.autoDelete? then options.autoDelete else true
-            steps.concat([
-                ch.assertExchange(partition_exch_name, 'x-consistent-hash', partition_exch_options)
-                ch.bindExchange(partition_exch_name, exch_options, topic)
+            cmds.concat([
+                ['assertExchange', partition_exch_name, 'x-consistent-hash', partition_exch_options]
+                ['bindExchange', partition_exch_name, exch_options, topic]
             ])
-            topic = '10' # for x-consistent hash echange topic is a weight
+            topic = '10' # for x-consistent-hash exchange topic is a weight
             
-        steps.push(
-            ch.bindQueue(queue, queue_binding_source, topic)
-        )
-
-        # TODO: add channel bindings to restart whole subscription if channel is closed
-        when_.all(steps)
+        cmds.push(['bindQueue', queue, queue_binding_source, topic])
+        ch.rpc(cmds)
 
 
-    # Different actions options parsing
-    # ---------------------------------
+    # Different rpc command option generators
+    # ---------------------------------------
 
     _parse_event: (event) ->
         assert _.isString(event), "event string required"
@@ -371,19 +361,6 @@ class Vent extends EventEmitter
 
     _generate_consumer_options: (options) ->
         noAck: not options.ack
-
-    # Channel utilities
-    # -----------------
-
-    _assert_exchange: (options, channel) ->
-        exch_name = options.channel
-        exch_options = @_generate_exchange_options(options)
-        if @_confirmed_exchanges[exch_name]
-            return when_(channel)
-
-        channel.assertExchange(exch_name, 'topic', exch_options).then =>
-            @_confirmed_exchanges[exch_name] = 1
-            channel
 
     # Message encoding
     # ----------------
@@ -450,5 +427,4 @@ class Vent extends EventEmitter
 
 module.exports = (setup, options) ->
     setup = {url: setup} if _.isString(setup)
-    logger.debug('setup', {setup})
     new Vent(setup, options)
