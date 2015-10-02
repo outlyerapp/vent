@@ -17,9 +17,12 @@ class VentChannel
             logger.error({err}, 'Channel error')
 
         on_close = =>
-            logger.info('Channel closed', {arguments})
-            #if @options.reconnect and not @_closed
-            #    @open()
+            logger.info('Channel closed')
+            if @options.reconnect and not @_closed
+                logger.info('Should reconnect channel', {queue})
+                # TODO: maybe next tick will be enough.
+                # We should manage timeout in one place
+                setTimeout(@open_channel, 1000)
 
         @get_connection()
             .then (conn) -> conn.createChannel()
@@ -32,8 +35,8 @@ class VentChannel
                     )
 
                 # Apply queued initialization commands, as soon as channel is opened
-                when_.all(chnl[cmd].apply(ch, args) for [cmd, args] in queue)
-                    .then(-> chnl)
+                when_.all(chnl[cmd].apply(chnl, args) for [cmd, args] in queue)
+                    .yield(chnl)
 
     _when_channel_ready: ->
         @_channel ?= @open_channel()
@@ -48,8 +51,9 @@ class VentChannel
             
         queue = @_command_queue
         @_when_channel_ready().then (ch) ->
-            queue.push(command, args)
+            queue.push([command, args])
             ch[command].apply(ch, args)
+            ch
 
     publish: (exchange, topic, content, options) ->
         @_when_channel_ready().then (ch) ->

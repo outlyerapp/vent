@@ -95,8 +95,10 @@ class Vent extends EventEmitter
             .done( ->
                 cb?()
             , (err) ->
-                logger.error({err}, 'Error when trying to open publishing channel')
-                cb(err) if cb?
+                logger.error({err}, 'Error when trying to publish')
+                unless cb
+                    throw new Error('Tried to publish without error callback, while channel was in error state')
+                cb(err)
             )
         @
 
@@ -230,7 +232,8 @@ class Vent extends EventEmitter
              # All other errors though should make library keep re-connecting
              # TODO: implement me
 
-        on_close = ->
+        on_close = =>
+            @_connected = null
             logger.info('Connection closed', {url})
             # TODO: figgure out what to do now
 
@@ -239,8 +242,18 @@ class Vent extends EventEmitter
             conn.on('error', on_error)
                 .on('close', on_close)
 
+    _connect: ->
+        when_.iterate(=>
+            @_create_connection().catch (err) =>
+                logger.warn({err}, 'Error when establishing connection. Re-trying soon')
+                when_(null).delay(1000)
+        , (conn) ->
+            conn isnt null
+        , (->)
+        , null)
+
     _when_connected: =>
-        @_connected ?= @_create_connection()
+        @_connected ?= @_connect()
 
     _get_connection_url: =>
         url = @url
@@ -301,6 +314,8 @@ class Vent extends EventEmitter
             
         cmds.push(['bindQueue', queue, queue_binding_source, topic])
         ch.rpc(cmds)
+            .catch (err) ->
+                logger.error({err}, 'Cought bound subscription error')
 
 
     # Different rpc command option generators
