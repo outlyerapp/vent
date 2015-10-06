@@ -197,9 +197,21 @@ class Vent extends EventEmitter
         @subscribe(event, _.extend({}, options, ack: true), stream.push_message)
         stream.on('close', @unsubscribe.bind(@, event, options, stream.push_message))
 
-    close: =>
-        # TODO: add vent close method implementation
-        logger.warn('Closing vent is not implemented yet!')
+    close: ->
+        # TODO: fix closing when vent is in kee_reconnecting loop
+        channels_closed = @_for_each_subscription_channel (when_channel) ->
+            when_channel.then (ch) -> ch.close()
+        channels_closed.push(
+            @_get_publisher.then (ch) -> ch.close()
+        )
+
+        @_subscriptions = []
+        connected = @_connected
+        @_connected = null
+        when_.all(channels_closed).finally =>
+            if connected?
+                return connected.then (c) -> c.close()
+            true
 
     #
     # Connection and channel handling
@@ -221,39 +233,48 @@ class Vent extends EventEmitter
         emit = @emit.bind(@)
 
         on_error = (err) ->
-             logger.error({err}, "Connection error", {url})
+            logger.error({err}, "AMQP connection error", {url})
 
-             # If it is PRECONDITION_FAILED error, it means that there is no point
-             # keeping reconnect. We can only fail whole process and wait for operator
-             # to fix queues.
-             if err.toString().match(/PRECONDITION-FAILED/)
-                 return emit('error', err)
-
-             # All other errors though should make library keep re-connecting
-             # TODO: implement me
+            # If it is PRECONDITION_FAILED error, it means that there is no point
+            # keeping reconnect. We can only fail whole process and wait for operator
+            # to fix queues.
+            if err.toString().match(/PRECONDITION-FAILED/)
+                emit('error', err)
 
         on_close = =>
-            @_connected = null
-            logger.info('Connection closed', {url})
-            # TODO: figgure out what to do now
+            logger.info('AMQP connection terminated', {url, @options, @_connected})
+            if @_connected? and @options.reconnect
+                @_connected = @_keep_trying_until_connected()
+                # TODO: maye just one-off resubscribe will do, provided it will close connection on failure
+                @_connected.then(@_keep_trying_until_all_resubscribed)
 
         amqp.connect(url).then (conn) =>
-            logger.debug('Opened new amqp connection', {url})
+            logger.info('AMQP connection is opened now', {url})
             conn.on('error', on_error)
                 .on('close', on_close)
 
-    _connect: ->
+    _keep_trying_until_connected: =>
         when_.iterate(=>
-            @_create_connection().catch (err) =>
-                logger.warn({err}, 'Error when establishing connection. Re-trying soon')
-                when_(null).delay(1000)
-        , (conn) ->
-            conn isnt null
+            @_create_connection()
+                .catch (err) ->
+                    logger.warn({err}, 'Error when establishing connection. Re-trying soon')
+                    when_(null).delay(1000)
+        , ((conn) -> conn isnt null)
+        , (->)
+        , null)
+
+    _keep_trying_until_all_resubscribed: =>
+        when_.iterate(=>
+            @_open_existing_subscriptions()
+                .catch (err) ->
+                    logger.warn({err}, 'Error when opening existing subscription channel. This can be issue with your code!', {reason: err.stackAtStateChange})
+                    when_(null).delay(1000)
+        , ((result) -> result isnt null)
         , (->)
         , null)
 
     _when_connected: =>
-        @_connected ?= @_connect()
+        @_connected ?= @_keep_trying_until_connected()
 
     _get_connection_url: =>
         url = @url
@@ -290,10 +311,7 @@ class Vent extends EventEmitter
             if options.prefetch?
                 cmds.push(['prefetch', options.prefetch])
 
-            # TODO: maybe we will be better having consumer at channel_stream level
             cmds.push(['consume', queue_name, consumer, consumer_options])
-
-            # TODO: add channel bindings to restart whole subscription if channel is closed
             ch.rpc(cmds).then(-> {ch, queue: queue_name})
 
     _bind_subscription: ({ch, queue}, options) ->
@@ -317,6 +335,19 @@ class Vent extends EventEmitter
             .catch (err) ->
                 logger.error({err}, 'Cought bound subscription error')
 
+    _open_existing_subscriptions: =>
+        channels_opened = @_for_each_subscription_channel (when_channel) ->
+            when_channel.then (ch) -> ch.open()
+        when_.all(channels_opened)
+
+    _for_each_subscription_channel: (fn) ->
+        ### Returns an array of items returned by fn for each item ###
+        r = []
+        pick_channel = ({ch, queue}) -> ch
+        for [e, h, when_subscription_ready] in @_subscriptions
+            p = when_subscription_ready.then(pick_channel)
+            r.push(fn(p))
+        r
 
     # Different rpc command option generators
     # ---------------------------------------
