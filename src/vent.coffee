@@ -328,10 +328,11 @@ class Vent extends EventEmitter
             partition_exch_name = "#{exch_name}.#{options.group}-splitter"
             partition_exch_options =
                 autoDelete: if options.autoDelete? then options.autoDelete else true
-            cmds.concat([
+            cmds = cmds.concat([
                 ['assertExchange', partition_exch_name, 'x-consistent-hash', partition_exch_options]
-                ['bindExchange', partition_exch_name, exch_options, topic]
+                ['bindExchange', partition_exch_name, exch_name, topic]
             ])
+            queue_binding_source = partition_exch_name
             topic = '10' # for x-consistent-hash exchange topic is a weight
             
         cmds.push(['bindQueue', queue, queue_binding_source, topic])
