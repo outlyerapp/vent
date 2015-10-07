@@ -32,7 +32,18 @@ class VentChannel
         @_channel ?= @_create_channel()
 
     open: ->
-        @_when_channel_ready()
+        when_finished_closing = when_(null)
+        if @_closed
+            if @_channel?
+                when_channel = @_channel
+                when_finished_closing = when_.promise((resolve, reject) ->
+                    when_channel.then((ch) ->
+                        ch.once('close', resolve)
+                    ).catch(reject)
+                )
+            @_closed = false
+
+        when_finished_closing.then(@_when_channel_ready)
 
     rpc: (command, args...) ->
         ### Execute one or many commands at channel.

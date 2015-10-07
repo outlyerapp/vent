@@ -163,10 +163,12 @@ class Vent extends EventEmitter
 
         event_options = @_parse_event(event)
         options = _.extend({}, @options, event_options, options)
+        close_sub_channel = ({ch, queue}) ->
+            ch.close()
 
         @_subscriptions = @_subscriptions.filter ([exch_name, handler, when_channel]) ->
             if exch_name is options.channel and handler is listener
-                when_channel.then ({ch, queue}) -> ch.close()
+                when_channel.then(close_sub_channel)
                 false
             true
         @
@@ -198,7 +200,7 @@ class Vent extends EventEmitter
         stream.on('close', @unsubscribe.bind(@, event, options, stream.push_message))
 
     close: ->
-        # TODO: fix closing when vent is in kee_reconnecting loop
+        # TODO: fix closing when vent is in keep_reconnecting loop
         channels_closed = @_for_each_subscription_channel (when_channel) ->
             when_channel.then (ch) -> ch.close()
         channels_closed.push(
@@ -349,6 +351,25 @@ class Vent extends EventEmitter
             r.push(fn(p))
         r
 
+    _close_channel_subscription: (ch) =>
+        ### This method gets called when we recive null message on chanenl, which indicates that queue got closed ###
+
+        # If vent set to reconnect, we will re-initalize channel replaying all assertions, otherwise we just
+        # remove it from subscriptions list
+        if @options.reconnect
+            after_channel_closed = (ch, sub_promise) ->
+                ch.open()
+        else
+            after_channel_closed = (ch, sub_promise) =>
+                @_subscriptions = @_subscriptions.filter ([e, h, sub_p]) ->
+                    sub_promise isnt sub_p
+
+        for [exch_name, handler, when_subscription_ready] in @_subscriptions
+            when_subscription_ready.then ({ch, queue}) ->
+                logger.debug('CLosing channel', {ch})
+                ch.close()
+                after_channel_closed(ch, when_subscription_ready)
+
     # Different rpc command option generators
     # ---------------------------------------
 
@@ -449,7 +470,10 @@ class Vent extends EventEmitter
     _wrap_consumer_callback: (fn, channel, options) ->
         """ Wrapper for unpacking message content """
         decode = @_decode_message
+        close_channel = @_close_channel_subscription
         wrapped = (msg) ->
+            if msg is null
+                return close_channel(channel)
             when_.try(-> decode(msg)).then(fn)
         if options.ack
             wrapped = @_wrap_ack_callback(wrapped, channel)
@@ -468,7 +492,7 @@ class Vent extends EventEmitter
                     # problem with message itself, we can end up in indefenite loop
                     logger.error({err}, 'Error in message consumer')
                 .finally ->
-                    channel.ack(msg)
+                    channel.ack(msg) if msg?
 
 
 module.exports = (setup, options) ->
