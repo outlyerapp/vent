@@ -200,7 +200,6 @@ class Vent extends EventEmitter
         stream.on('close', @unsubscribe.bind(@, event, options, stream.push_message))
 
     close: ->
-        # TODO: fix closing when vent is in keep_reconnecting loop
         channels_closed = @_for_each_subscription_channel (when_channel) ->
             when_channel.then (ch) -> ch.close()
         channels_closed.push(
@@ -244,10 +243,9 @@ class Vent extends EventEmitter
                 emit('error', err)
 
         on_close = =>
-            logger.info('AMQP connection terminated', {url, @options, @_connected})
+            logger.info('AMQP connection terminated', {url})
             if @_connected? and @options.reconnect
                 @_connected = @_keep_trying_until_connected()
-                # TODO: maye just one-off resubscribe will do, provided it will close connection on failure
                 @_connected.then(@_keep_trying_until_all_resubscribed)
 
         amqp.connect(url).then (conn) =>
@@ -257,6 +255,8 @@ class Vent extends EventEmitter
 
     _keep_trying_until_connected: =>
         when_.iterate(=>
+            if not @_connected?
+                throw new Error('Aborted')
             @_create_connection()
                 .catch (err) ->
                     logger.warn({err}, 'Error when establishing connection. Re-trying soon')
@@ -267,6 +267,8 @@ class Vent extends EventEmitter
 
     _keep_trying_until_all_resubscribed: =>
         when_.iterate(=>
+            if not @_connected?
+                throw new Error('Aborted')
             @_open_existing_subscriptions()
                 .catch (err) ->
                     logger.warn({err}, 'Error when opening existing subscription channel. This can be issue with your code!', {reason: err.stackAtStateChange})
