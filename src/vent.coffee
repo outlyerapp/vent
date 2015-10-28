@@ -196,8 +196,10 @@ class Vent extends EventEmitter
         stream = options.stream
         unless stream? and _.isFunction(stream.push_message)
             stream = new vent_stream.ConsumerStream(_.pick(options, 'high_watermark', 'highWatermark'))
+            stream.on('close', @unsubscribe.bind(@, event, options, stream.push_message))
+
         @subscribe(event, _.extend({}, options, ack: true), stream.push_message)
-        stream.on('close', @unsubscribe.bind(@, event, options, stream.push_message))
+        stream
 
     close: ->
         channels_closed = @_for_each_subscription_channel (when_channel) ->
