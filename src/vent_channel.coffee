@@ -60,12 +60,13 @@ class VentChannel
                 .yield(ch)
 
     publish: (exchange, topic, content, options) ->
+        self = @
         @_when_channel_ready().then (ch) ->
             if not ch.publish(exchange, topic, content, options)
                 logger.info('AMQP channel overloaded')
                 deferred = when_.defer()
-                return channel.once('drain', deferred.resolve.bind(deferred, @))
-            @
+                return ch.once('drain', deferred.resolve.bind(deferred, self))
+            self
 
     ack: (msg) ->
         @_when_channel_ready().then (ch) ->
