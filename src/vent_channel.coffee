@@ -63,7 +63,7 @@ class VentChannel
         self = @
         @_when_channel_ready().then (ch) ->
             if not ch.publish(exchange, topic, content, options)
-                logger.info('AMQP channel overloaded')
+                logger.debug('AMQP channel overloaded')
                 deferred = when_.defer()
                 return ch.once('drain', deferred.resolve.bind(deferred, self))
             self
