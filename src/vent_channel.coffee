@@ -21,6 +21,9 @@ class VentChannel
             .then (chnl) ->
                 chnl.on('close', on_close)
 
+                # Increase listeners for drain subscription on publish
+                chnl.setMaxListeners(0)
+
                 # Apply queued initialization commands, as soon as channel is opened
                 executed = (chnl[cmd].apply(chnl, args) for [cmd, args] in queue)
                 when_.all(executed)
